@@ -14,6 +14,7 @@ Production:     gunicorn app:app   (see README.md)
 """
 
 import os
+import io
 import re
 import json
 import uuid
@@ -47,6 +48,17 @@ app = Flask(__name__)
 # value for local use (sessions reset on restart if not set).
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+# Session cookie hardening (HTTPS-only, no JS access, CSRF-resistant).
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("COOKIE_SECURE", "1") == "1"
+app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 8  # 8 hours
+
+# Optional persistent database (Neon/Supabase Postgres). When DATABASE_URL is
+# set, users + reviewed records + uploaded files are stored there so they
+# survive restarts/redeploys. Without it, the app falls back to JSON files.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+USE_DB = bool(DATABASE_URL)
 
 
 # --------------------------------------------------------------------------
@@ -498,6 +510,157 @@ def save_records(records):
 
 
 # --------------------------------------------------------------------------
+# Storage abstraction: Postgres (Neon/Supabase) when DATABASE_URL is set,
+# else the JSON-file backend above. Keeps users, reviewed records and the
+# original uploaded files so everything persists across restarts/redeploys.
+# --------------------------------------------------------------------------
+_REC_COLS = ["id", "original_name", "ext", "size_bytes",
+             "uploaded_by", "uploaded_at", "findings"]
+
+
+def _db():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
+
+def init_db():
+    if not USE_DB:
+        load_users()           # seed admin in file mode
+        return
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS users ("
+                "username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, name TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS records ("
+                "id TEXT PRIMARY KEY, original_name TEXT, ext TEXT, size_bytes BIGINT, "
+                "uploaded_by TEXT, uploaded_at TEXT, findings JSONB, file_bytes BYTEA)")
+    cur.execute("SELECT COUNT(*) FROM users")
+    if cur.fetchone()[0] == 0:
+        pw = os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")
+        cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s)",
+                    ("admin", generate_password_hash(pw), "Administrator"))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_user(username):
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT password_hash, name FROM users WHERE username=%s", (username,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return {"password_hash": row[0], "name": row[1]} if row else None
+    return load_users().get(username)
+
+
+def add_user(username, password, name):
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s) "
+                    "ON CONFLICT (username) DO UPDATE SET "
+                    "password_hash=EXCLUDED.password_hash, name=EXCLUDED.name",
+                    (username, generate_password_hash(password), name))
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        users = load_users()
+        users[username] = {"password_hash": generate_password_hash(password), "name": name}
+        _save(USERS_FILE, users)
+
+
+def save_record(record, file_bytes):
+    if USE_DB:
+        import psycopg2
+        import psycopg2.extras
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO records (id, original_name, ext, size_bytes, uploaded_by, "
+                    "uploaded_at, findings, file_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (record["id"], record["original_name"], record["ext"],
+                     record["size_bytes"], record["uploaded_by"], record["uploaded_at"],
+                     psycopg2.extras.Json(record["findings"]),
+                     psycopg2.Binary(file_bytes) if file_bytes else None))
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        records = load_records()
+        records.append(record)
+        save_records(records)
+
+
+def list_records():
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, original_name, ext, size_bytes, uploaded_by, uploaded_at, "
+                    "findings FROM records ORDER BY uploaded_at DESC")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(zip(_REC_COLS, r)) for r in rows]
+    return sorted(load_records(), key=lambda r: r["uploaded_at"], reverse=True)
+
+
+def get_record(rec_id):
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, original_name, ext, size_bytes, uploaded_by, uploaded_at, "
+                    "findings FROM records WHERE id=%s", (rec_id,))
+        r = cur.fetchone()
+        cur.close()
+        conn.close()
+        return dict(zip(_REC_COLS, r)) if r else None
+    return next((r for r in load_records() if r["id"] == rec_id), None)
+
+
+def get_record_file(rec_id):
+    """Return (original_name, bytes) for download, or None."""
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT original_name, file_bytes FROM records WHERE id=%s", (rec_id,))
+        r = cur.fetchone()
+        cur.close()
+        conn.close()
+        if r and r[1] is not None:
+            return (r[0], bytes(r[1]))
+        return None
+    rec = get_record(rec_id)
+    if rec and rec.get("stored_name"):
+        p = os.path.join(UPLOAD_DIR, rec["stored_name"])
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                return (rec["original_name"], f.read())
+    return None
+
+
+def delete_record(rec_id):
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM records WHERE id=%s", (rec_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        records = load_records()
+        rec = next((r for r in records if r["id"] == rec_id), None)
+        if rec:
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, rec.get("stored_name", "")))
+            except OSError:
+                pass
+            save_records([r for r in records if r["id"] != rec_id])
+
+
+# --------------------------------------------------------------------------
 # Auth
 # --------------------------------------------------------------------------
 def login_required(view):
@@ -514,8 +677,7 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        users = load_users()
-        user = users.get(username)
+        user = get_user(username)
         if user and check_password_hash(user["password_hash"], password):
             session["user"] = username
             session["name"] = user.get("name", username)
@@ -1182,7 +1344,7 @@ def basic_review(path, ext):
 @app.route("/")
 @login_required
 def dashboard():
-    records = sorted(load_records(), key=lambda r: r["uploaded_at"], reverse=True)
+    records = list_records()
     return render_template("dashboard.html", records=records, name=session.get("name"))
 
 
@@ -1225,6 +1387,9 @@ def upload():
         if reg is not None and fs_sc is not None:
             findings["acra"]["share_capital_matches"] = abs(reg - fs_sc) <= 0.5
 
+    with open(stored_path, "rb") as _fb:
+        file_bytes = _fb.read()
+
     record = {
         "id": rec_id,
         "original_name": file.filename,
@@ -1235,9 +1400,7 @@ def upload():
         "uploaded_at": dt.datetime.now().isoformat(timespec="seconds"),
         "findings": findings,
     }
-    records = load_records()
-    records.append(record)
-    save_records(records)
+    save_record(record, file_bytes)
 
     flash("File uploaded and reviewed.", "success")
     return redirect(url_for("report", rec_id=rec_id))
@@ -1246,7 +1409,7 @@ def upload():
 @app.route("/report/<rec_id>")
 @login_required
 def report(rec_id):
-    record = next((r for r in load_records() if r["id"] == rec_id), None)
+    record = get_record(rec_id)
     if not record:
         abort(404)
     return render_template("report.html", r=record)
@@ -1255,28 +1418,19 @@ def report(rec_id):
 @app.route("/download/<rec_id>")
 @login_required
 def download(rec_id):
-    record = next((r for r in load_records() if r["id"] == rec_id), None)
-    if not record:
+    from flask import send_file
+    got = get_record_file(rec_id)
+    if not got:
         abort(404)
-    return send_from_directory(
-        UPLOAD_DIR, record["stored_name"],
-        as_attachment=True, download_name=record["original_name"],
-    )
+    name, data = got
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=name)
 
 
 @app.route("/delete/<rec_id>", methods=["POST"])
 @login_required
 def delete(rec_id):
-    records = load_records()
-    record = next((r for r in records if r["id"] == rec_id), None)
-    if record:
-        try:
-            os.remove(os.path.join(UPLOAD_DIR, record["stored_name"]))
-        except OSError:
-            pass
-        records = [r for r in records if r["id"] != rec_id]
-        save_records(records)
-        flash("Record deleted.", "success")
+    delete_record(rec_id)
+    flash("Record deleted.", "success")
     return redirect(url_for("dashboard"))
 
 
@@ -1408,7 +1562,7 @@ def build_word_report(record):
 @login_required
 def download_report(rec_id):
     from flask import send_file
-    record = next((r for r in load_records() if r["id"] == rec_id), None)
+    record = get_record(rec_id)
     if not record:
         abort(404)
     buf = build_word_report(record)
@@ -1426,8 +1580,14 @@ def filesize(n):
     return f"{n:.1f} TB"
 
 
+# Initialise storage (create tables + seed admin) at startup. Wrapped so a
+# transient DB hiccup doesn't stop the app from booting.
+try:
+    init_db()
+except Exception as _e:
+    print(f"[init_db] warning: {_e}")
+
+
 if __name__ == "__main__":
-    # Ensure seed user exists on first run.
-    load_users()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
