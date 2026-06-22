@@ -159,6 +159,10 @@ DASHBOARD_HTML = """{% extends "base.html" %}
              style="font-size:15px">
       <p class="muted" style="margin:10px 0 0">Choose a file, then submit.</p>
     </div>
+    <div style="margin:0 0 16px">
+      <label for="acra_sc" style="font-size:13px">Registered share capital per ACRA Business Profile <span class="muted">(optional — for cross-check)</span></label>
+      <input type="text" id="acra_sc" name="acra_share_capital" placeholder="e.g. 100" style="margin-top:6px">
+    </div>
     <button class="btn" type="submit">Upload &amp; review</button>
   </form>
 </div>
@@ -224,6 +228,34 @@ REPORT_HTML = """{% extends "base.html" %}
        <span class="muted">(may be absent, named differently, or in a separate file):</span></p>
     <ul>{% for s in f.sections_missing %}<li class="muted">{{ s }}</li>{% endfor %}</ul>
   {% endif %}
+</div>
+
+<div class="card">
+  <h2>ACRA verification
+    {% if not f.acra.enabled %}<span class="pill warn">no UEN found</span>
+    {% elif f.acra.found and f.acra.name_matches %}<span class="pill good">UEN verified</span>
+    {% elif f.acra.found %}<span class="pill warn">check name</span>
+    {% else %}<span class="pill bad">UEN not in register</span>{% endif %}</h2>
+  {% if f.acra.error and not f.acra.found %}<p class="muted">{{ f.acra.error }}</p>{% endif %}
+  {% if f.acra.uen %}
+  <table>
+    <tbody>
+      <tr><td style="width:38%"><strong>UEN in document</strong></td><td>{{ f.acra.uen }}</td></tr>
+      {% if f.acra.found %}
+      <tr><td><strong>ACRA registered name</strong></td><td>{{ f.acra.official_name }}
+        {% if f.acra.name_matches %}<span class="pill good">matches</span>{% else %}<span class="pill bad">differs from document</span>{% endif %}</td></tr>
+      <tr><td><strong>Registration status</strong></td><td>{{ f.acra.status }}</td></tr>
+      <tr><td><strong>Registered address</strong></td><td>{{ f.acra.address }}</td></tr>
+      {% endif %}
+      <tr><td><strong>Share capital (per FS)</strong></td><td>{% if f.acra.fs_share_capital is not none %}{{ "{:,.2f}".format(f.acra.fs_share_capital) }}{% else %}not detected{% endif %}</td></tr>
+      {% if f.acra.registered_share_capital is not none %}
+      <tr><td><strong>Share capital (per ACRA, entered)</strong></td><td>{{ "{:,.2f}".format(f.acra.registered_share_capital) }}
+        {% if f.acra.share_capital_matches %}<span class="pill good">matches</span>{% else %}<span class="pill bad">does not match</span>{% endif %}</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if f.acra.registered_share_capital is none %}<p class="muted" style="margin-top:10px">Share capital is not in ACRA's free data. To cross-check it, enter the figure from the paid ACRA Business Profile in the upload form.</p>{% endif %}
 </div>
 
 <div class="card">
@@ -518,6 +550,8 @@ COMMON_TYPOS = {
     "recieve": "receive", "recievable": "receivable", "seperate": "separate",
     "occured": "occurred", "non-curent": "non-current", "balacne": "balance",
     "liabilites": "liabilities", "expences": "expenses", "incured": "incurred",
+    "yearically": "periodically", "theses": "these", "managment": "management",
+    "acquisiton": "acquisition", "transalated": "translated",
 }
 
 # FRS disclosure checklist — keyword presence heuristics
@@ -904,6 +938,75 @@ def ai_review(extracted_text):
                 "frs_observations": [], "grammar_issues": [], "narrative": ""}
 
 
+# --------------------------------------------------------------------------
+# ACRA verification — checks the UEN against ACRA's free open data
+# (data.gov.sg), and extracts the FS share capital for manual comparison
+# against the (paid) ACRA Business Profile.
+# --------------------------------------------------------------------------
+import urllib.request
+import urllib.parse
+
+ACRA_RESOURCE = "d_3f960c10fed6145404ca7b821f263b87"
+# Singapore UEN formats: 9-digit businesses, 10-char local companies (yyyy+5+letter),
+# and the (T|S|R)yyXXnnnnX form for others.
+UEN_RE = re.compile(
+    r"\b(\d{9}[A-Z]|\d{8}[A-Z]|[TSR]\d{2}[A-Z]{2}\d{4}[A-Z])\b")
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def extract_share_capital(doc):
+    """The FS share-capital figure (from the balance sheet / share capital line)."""
+    for table in doc.tables:
+        labels, numgrid = _grid(table)
+        skip = _note_columns(table)
+        for r, label in enumerate(labels):
+            if label.lower().strip() == "share capital":
+                for c in range(1, len(numgrid[r])):
+                    if c in skip:
+                        continue
+                    if numgrid[r][c] is not None:
+                        return numgrid[r][c]
+    return None
+
+
+def acra_check(full_text):
+    """Verify the UEN found in the document against ACRA's free open data."""
+    out = {"enabled": True, "error": None, "uen": None, "found": False,
+           "official_name": None, "status": None, "address": None,
+           "name_matches": None}
+    m = UEN_RE.search(full_text)
+    if not m:
+        out["enabled"] = False
+        out["error"] = "No UEN / company registration number was found in the document."
+        return out
+    uen = m.group(1)
+    out["uen"] = uen
+    try:
+        url = ("https://data.gov.sg/api/action/datastore_search?resource_id="
+               + ACRA_RESOURCE + "&q=" + urllib.parse.quote(uen))
+        req = urllib.request.Request(url, headers={"User-Agent": "fs-review"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        records = data.get("result", {}).get("records", [])
+        rec = next((x for x in records if x.get("uen", "").upper() == uen.upper()), None)
+        if rec:
+            out["found"] = True
+            out["official_name"] = rec.get("entity_name")
+            out["status"] = rec.get("uen_status_desc")
+            out["address"] = (f"{rec.get('reg_street_name','')} "
+                              f"{rec.get('reg_postal_code','')}").strip()
+            out["name_matches"] = _norm(rec.get("entity_name")) in _norm(full_text)
+        else:
+            out["error"] = f"UEN {uen} was not found in the ACRA register."
+    except Exception as e:
+        out["enabled"] = False
+        out["error"] = f"Could not reach the ACRA data service: {e}"
+    return out
+
+
 def review_docx(path):
     """Return a dict of findings for a .docx file (rule-based, offline)."""
     findings = {
@@ -915,6 +1018,10 @@ def review_docx(path):
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
                "grammar_issues": [], "narrative": ""},
+        "acra": {"enabled": False, "error": None, "uen": None, "found": False,
+                 "official_name": None, "status": None, "address": None,
+                 "name_matches": None, "fs_share_capital": None,
+                 "registered_share_capital": None, "share_capital_matches": None},
         "warnings": [], "error": None,
     }
     try:
@@ -954,6 +1061,12 @@ def review_docx(path):
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
     findings["ai"] = ai_review(extract_full_text(doc))
 
+    acra = acra_check(extract_full_text(doc))
+    acra["fs_share_capital"] = extract_share_capital(doc)
+    acra["registered_share_capital"] = None
+    acra["share_capital_matches"] = None
+    findings["acra"] = acra
+
     findings["warnings"].append(
         "This is an automated, rule-based first pass (arithmetic, balance equation, "
         "British-English spelling and an FRS disclosure checklist). It does NOT yet "
@@ -982,6 +1095,10 @@ def basic_review(path, ext):
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
                "grammar_issues": [], "narrative": ""},
+        "acra": {"enabled": False, "error": None, "uen": None, "found": False,
+                 "official_name": None, "status": None, "address": None,
+                 "name_matches": None, "fs_share_capital": None,
+                 "registered_share_capital": None, "share_capital_matches": None},
     }
 
 
@@ -1016,6 +1133,16 @@ def upload():
     file.save(stored_path)
 
     findings = basic_review(stored_path, ext)
+
+    # Optional: compare FS share capital against the figure from the (paid)
+    # ACRA Business Profile, if the reviewer typed it on the upload form.
+    reg_sc = request.form.get("acra_share_capital", "").strip()
+    if reg_sc and "acra" in findings:
+        val = _to_number(reg_sc)
+        findings["acra"]["registered_share_capital"] = val
+        fs_sc = findings["acra"].get("fs_share_capital")
+        if val is not None and fs_sc is not None:
+            findings["acra"]["share_capital_matches"] = abs(val - fs_sc) <= 0.5
 
     record = {
         "id": rec_id,
@@ -1123,6 +1250,27 @@ def build_word_report(record):
     if f.get("error"):
         body(f["error"]);
     else:
+        ac = f.get("acra", {})
+        if ac.get("uen"):
+            H("ACRA verification")
+            rows = [["UEN in document", ac.get("uen", "")]]
+            if ac.get("found"):
+                nm = (ac.get("official_name") or "") + (
+                    "  (matches)" if ac.get("name_matches") else "  (differs)")
+                rows.append(["ACRA registered name", nm])
+                rows.append(["Registration status", ac.get("status", "")])
+                rows.append(["Registered address", ac.get("address", "")])
+            elif ac.get("error"):
+                rows.append(["Result", ac.get("error")])
+            sc = ac.get("fs_share_capital")
+            rows.append(["Share capital (per FS)",
+                         f"{sc:,.2f}" if sc is not None else "not detected"])
+            rsc = ac.get("registered_share_capital")
+            if rsc is not None:
+                rows.append(["Share capital (per ACRA)", f"{rsc:,.2f}" + (
+                    "  (matches)" if ac.get("share_capital_matches") else "  (mismatch)")])
+            table(["Field", "Value"], rows)
+
         H("Numerical & arithmetic findings")
         if f["tally_checks"] or f["pl_checks"] or f["row_checks"] or \
            any(not b["balanced"] for b in f["balance_checks"]):
