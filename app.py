@@ -50,6 +50,365 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
 
 # --------------------------------------------------------------------------
+# Templates are embedded here (no separate templates/ folder needed)
+# --------------------------------------------------------------------------
+from jinja2 import DictLoader
+
+BASE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}FS Review{% endblock %}</title>
+  <style>
+    :root{
+      --bg:#f4f6f9; --card:#ffffff; --ink:#1f2937; --muted:#6b7280;
+      --line:#e5e7eb; --brand:#1d4ed8; --brand-dark:#1e40af;
+      --good:#047857; --good-bg:#ecfdf5; --bad:#b91c1c; --bad-bg:#fef2f2;
+      --warn:#92400e; --warn-bg:#fffbeb;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      background:var(--bg);color:var(--ink);line-height:1.5}
+    a{color:var(--brand);text-decoration:none}
+    a:hover{text-decoration:underline}
+    .topbar{background:var(--brand);color:#fff;padding:14px 24px;display:flex;
+      align-items:center;justify-content:space-between}
+    .topbar .brand{font-weight:700;font-size:18px;letter-spacing:.2px}
+    .topbar a{color:#dbeafe}
+    .wrap{max-width:920px;margin:32px auto;padding:0 20px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+      padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.04);margin-bottom:20px}
+    h1{font-size:22px;margin:0 0 4px}
+    h2{font-size:16px;margin:0 0 12px;color:var(--ink)}
+    .muted{color:var(--muted);font-size:14px}
+    .btn{display:inline-block;background:var(--brand);color:#fff;border:none;
+      padding:10px 18px;border-radius:8px;font-size:15px;cursor:pointer;font-weight:600}
+    .btn:hover{background:var(--brand-dark);text-decoration:none}
+    .btn.secondary{background:#fff;color:var(--brand);border:1px solid var(--brand)}
+    .btn.danger{background:#fff;color:var(--bad);border:1px solid var(--bad);padding:6px 12px;font-size:13px}
+    input[type=text],input[type=password]{width:100%;padding:11px 12px;border:1px solid var(--line);
+      border-radius:8px;font-size:15px;margin-top:6px}
+    label{font-size:14px;font-weight:600}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}
+    th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+    .flash{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:14px}
+    .flash.error{background:var(--bad-bg);color:var(--bad);border:1px solid #fecaca}
+    .flash.success{background:var(--good-bg);color:var(--good);border:1px solid #a7f3d0}
+    .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
+    .pill.good{background:var(--good-bg);color:var(--good)}
+    .pill.bad{background:var(--bad-bg);color:var(--bad)}
+    .pill.warn{background:var(--warn-bg);color:var(--warn)}
+    .dropzone{border:2px dashed #c7d2fe;border-radius:12px;padding:28px;text-align:center;
+      background:#f8faff;margin:8px 0 16px}
+    ul{margin:8px 0;padding-left:20px}
+    li{margin:3px 0}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">FS Review Portal</div>
+    <div>
+      {% if session.get('user') %}
+        <span style="color:#dbeafe;font-size:14px">{{ session.get('name') }}</span>
+        &nbsp;·&nbsp; <a href="{{ url_for('logout') }}">Log out</a>
+      {% endif %}
+    </div>
+  </div>
+  <div class="wrap">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>"""
+
+LOGIN_HTML = """{% extends "base.html" %}
+{% block title %}Sign in · FS Review{% endblock %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:40px auto">
+  <h1>Sign in</h1>
+  <p class="muted">Enter your credentials to access the FS review portal.</p>
+  <form method="post" action="{{ url_for('login') }}" style="margin-top:16px">
+    <div style="margin-bottom:14px">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div style="margin-bottom:20px">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn" type="submit" style="width:100%">Sign in</button>
+  </form>
+</div>
+{% endblock %}"""
+
+DASHBOARD_HTML = """{% extends "base.html" %}
+{% block title %}Dashboard · FS Review{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Upload financial statements</h1>
+  <p class="muted">Allowed file types: .docx, .pdf, .xlsx, .xls — max 25 MB. A review report is generated on upload.</p>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+    <div class="dropzone">
+      <input type="file" name="file" accept=".docx,.pdf,.xlsx,.xls" required
+             style="font-size:15px">
+      <p class="muted" style="margin:10px 0 0">Choose a file, then submit.</p>
+    </div>
+    <button class="btn" type="submit">Upload &amp; review</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Reviewed files</h2>
+  {% if records %}
+  <table>
+    <thead>
+      <tr><th>File</th><th>Type</th><th>Size</th><th>Uploaded</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td><a href="{{ url_for('report', rec_id=r.id) }}">{{ r.original_name }}</a><br>
+            <span class="muted" style="font-size:12px">by {{ r.uploaded_by }}</span></td>
+        <td>{{ r.ext.lstrip('.')|upper }}</td>
+        <td>{{ r.size_bytes|filesize }}</td>
+        <td class="muted">{{ r.uploaded_at.replace('T',' ') }}</td>
+        <td><a href="{{ url_for('report', rec_id=r.id) }}">View report →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No files reviewed yet. Upload one above to get started.</p>
+  {% endif %}
+</div>
+{% endblock %}"""
+
+REPORT_HTML = """{% extends "base.html" %}
+{% block title %}Review report · {{ r.original_name }}{% endblock %}
+{% block content %}
+<div class="card">
+  <p class="muted"><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
+  <h1>Review report</h1>
+  <p class="muted">{{ r.original_name }} · {{ r.ext.lstrip('.')|upper }} · {{ r.size_bytes|filesize }}
+     · uploaded {{ r.uploaded_at.replace('T',' ') }} by {{ r.uploaded_by }}</p>
+  <p style="margin-top:14px">
+    <a class="btn secondary" href="{{ url_for('download', rec_id=r.id) }}">Download original</a>
+    <a class="btn" href="{{ url_for('download_report', rec_id=r.id) }}">Download review report (Word)</a>
+  </p>
+</div>
+
+{% set f = r.findings %}
+
+{% if f.error %}
+<div class="card">
+  <span class="pill bad">Could not parse</span>
+  <p style="margin-top:12px">{{ f.error }}</p>
+</div>
+{% else %}
+
+<div class="card">
+  <h2>Document structure</h2>
+  <p><strong>{{ f.tables }}</strong> table(s), <strong>{{ f.paragraph_count }}</strong> non-empty paragraph(s).</p>
+  {% if f.sections_found %}
+    <p style="margin-top:12px"><strong>Sections detected:</strong></p>
+    <ul>{% for s in f.sections_found %}<li>{{ s }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if f.sections_missing %}
+    <p style="margin-top:12px"><strong>Common sections not detected</strong>
+       <span class="muted">(may be absent, named differently, or in a separate file):</span></p>
+    <ul>{% for s in f.sections_missing %}<li class="muted">{{ s }}</li>{% endfor %}</ul>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Arithmetic / tally checks {% if f.tally_checks %}<span class="pill bad">{{ f.tally_checks|length }} flagged</span>{% else %}<span class="pill good">No mismatches found</span>{% endif %}</h2>
+  {% if f.tally_checks %}
+  <p class="muted">Subtotals/totals where the lines above do not add up to the stated figure — verify each:</p>
+  <table>
+    <thead><tr><th>Table</th><th>Total line</th><th>Issue</th><th>Sum of lines</th><th>Stated</th><th>Difference</th></tr></thead>
+    <tbody>
+      {% for c in f.tally_checks %}
+      <tr>
+        <td>{{ c.table }}</td><td>{{ c.label }}</td>
+        <td>{% if c.kind == 'sign / brackets' %}<span class="pill warn">sign / brackets</span>{% else %}<span class="pill bad">does not add up</span>{% endif %}</td>
+        <td>{{ "{:,.2f}".format(c.sum_of_parts) }}</td>
+        <td>{{ "{:,.2f}".format(c.stated_total) }}</td>
+        <td style="color:#b91c1c">{{ "{:,.2f}".format(c.difference) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No column-total mismatches were detected.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Balance sheet equation
+    {% if f.balance_checks %}
+      {% set unbalanced = f.balance_checks | selectattr('balanced', 'equalto', false) | list %}
+      {% if unbalanced %}<span class="pill bad">Does not balance</span>{% else %}<span class="pill good">Balances</span>{% endif %}
+    {% else %}<span class="pill warn">Not found</span>{% endif %}</h2>
+  {% if f.balance_checks %}
+  <p class="muted">Total assets vs. total equity + total liabilities:</p>
+  <table>
+    <thead><tr><th>Total assets</th><th>Equity + liabilities</th><th>Difference</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for b in f.balance_checks %}
+      <tr>
+        <td>{{ "{:,.2f}".format(b.total_assets) }}</td>
+        <td>{{ "{:,.2f}".format(b.equity_plus_liabilities) }}</td>
+        <td {% if not b.balanced %}style="color:#b91c1c"{% endif %}>{{ "{:,.2f}".format(b.difference) }}</td>
+        <td>{% if b.balanced %}<span class="pill good">OK</span>{% else %}<span class="pill bad">Off</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Could not locate "Total assets" / "Total equity" / "Total liabilities" lines to test the balance equation. Check the labels in the statement of financial position.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Profit &amp; loss flow {% if f.pl_checks %}<span class="pill bad">{{ f.pl_checks|length }} flagged</span>{% else %}<span class="pill good">Consistent</span>{% endif %}</h2>
+  {% if f.pl_checks %}
+  <table>
+    <thead><tr><th>Table</th><th>Check</th><th>Expected</th><th>Stated</th><th>Difference</th></tr></thead>
+    <tbody>
+      {% for c in f.pl_checks %}
+      <tr><td>{{ c.table }}</td><td>{{ c.check }}</td>
+        <td>{{ "{:,.2f}".format(c.expected) }}</td>
+        <td>{{ "{:,.2f}".format(c.stated) }}</td>
+        <td style="color:#b91c1c">{{ "{:,.2f}".format(c.difference) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Gross profit and loss/profit for the year tie to their components (or no P&amp;L detected).</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Cross-add checks (changes in equity, etc.) {% if f.row_checks %}<span class="pill bad">{{ f.row_checks|length }} flagged</span>{% else %}<span class="pill good">OK</span>{% endif %}</h2>
+  {% if f.row_checks %}
+  <table>
+    <thead><tr><th>Table</th><th>Row</th><th>Sum across</th><th>Stated total</th><th>Difference</th></tr></thead>
+    <tbody>
+      {% for c in f.row_checks %}
+      <tr><td>{{ c.table }}</td><td>{{ c.row }}</td>
+        <td>{{ "{:,.2f}".format(c.sum_across) }}</td>
+        <td>{{ "{:,.2f}".format(c.stated_total) }}</td>
+        <td style="color:#b91c1c">{{ "{:,.2f}".format(c.difference) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Rows with a "Total" column add across correctly (or none found).</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>FRS disclosure checklist</h2>
+  <p class="muted">Keyword scan for common Singapore FRS disclosures. "Not found" doesn't always mean missing — it flags items to confirm manually.</p>
+  <table>
+    <thead><tr><th>FRS</th><th>Disclosure</th><th>Detected?</th></tr></thead>
+    <tbody>
+      {% for k in f.frs_checks %}
+      <tr>
+        <td>{{ k.frs }}</td><td>{{ k.item }}</td>
+        <td>{% if k.present %}<span class="pill good">Found</span>{% else %}<span class="pill warn">Not found — check</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>AI review — FRS judgement &amp; grammar
+    {% if f.ai.enabled %}<span class="pill good">enabled</span>{% else %}<span class="pill warn">off</span>{% endif %}</h2>
+  {% if not f.ai.enabled %}
+    <p class="muted">{{ f.ai.error }}</p>
+  {% else %}
+    {% if f.ai.narrative %}<p>{{ f.ai.narrative }}</p>{% endif %}
+    <p style="margin-top:12px"><strong>FRS observations</strong></p>
+    {% if f.ai.frs_observations %}
+    <table>
+      <thead><tr><th>FRS</th><th>Issue</th><th>Detail</th><th>Recommendation</th></tr></thead>
+      <tbody>
+        {% for o in f.ai.frs_observations %}
+        <tr><td>{{ o.frs }}</td><td>{{ o.issue }}</td><td>{{ o.detail }}</td><td>{{ o.recommendation }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No FRS issues raised.</p>{% endif %}
+    <p style="margin-top:12px"><strong>Grammar &amp; wording</strong></p>
+    {% if f.ai.grammar_issues %}
+    <table>
+      <thead><tr><th>Location</th><th>Current</th><th>Suggested</th></tr></thead>
+      <tbody>
+        {% for g in f.ai.grammar_issues %}
+        <tr><td>{{ g.location }}</td><td>{{ g.current }}</td><td>{{ g.suggested }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No grammar issues raised.</p>{% endif %}
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Language &amp; spelling (rule scan) {% if f.language_issues %}<span class="pill warn">{{ f.language_issues|length }} to review</span>{% else %}<span class="pill good">Nothing flagged</span>{% endif %}</h2>
+  {% if f.language_issues %}
+  <table>
+    <thead><tr><th>Type</th><th>Found</th><th>Suggest</th><th>Context</th></tr></thead>
+    <tbody>
+      {% for g in f.language_issues %}
+      <tr>
+        <td>{{ g.kind }}</td><td>{{ g.found }}</td><td>{{ g.suggest }}</td>
+        <td class="muted">…{{ g.context }}…</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No British-English or common-typo issues detected by the rule scan.</p>
+  {% endif %}
+</div>
+
+{% if f.warnings %}
+<div class="card">
+  <h2>Notes &amp; scope</h2>
+  <ul>{% for w in f.warnings %}<li class="muted">{{ w }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+{% endif %}
+
+<div class="card" style="background:#fffbeb;border-color:#fde68a">
+  <p class="muted" style="margin:0">This automated review is a first-pass aid, not a substitute for a full
+  FRS/IFRS compliance review by a qualified reviewer.</p>
+</div>
+
+<form method="post" action="{{ url_for('delete', rec_id=r.id) }}"
+      onsubmit="return confirm('Delete this file and its report?')">
+  <button class="btn danger" type="submit">Delete file</button>
+</form>
+{% endblock %}"""
+
+app.jinja_loader = DictLoader({
+    "base.html": BASE_HTML,
+    "login.html": LOGIN_HTML,
+    "dashboard.html": DASHBOARD_HTML,
+    "report.html": REPORT_HTML,
+})
+
+
+# --------------------------------------------------------------------------
 # Tiny JSON "database" helpers
 # --------------------------------------------------------------------------
 def _load(path, default):
@@ -207,43 +566,89 @@ def _grid(table):
     return labels, numgrid
 
 
-def check_table_totals(t_idx, table):
-    """Find rows labelled '...total...' and check the column sums above them.
+# Grand totals sum *subtotals* across sections, not leaf lines — so they are
+# not checked by the simple "sum the lines above" rule (it would misfire).
+GRAND_TOTALS = {
+    "total assets", "total liabilities", "total equity and liabilities",
+    "total equity & liabilities", "net assets", "net current assets",
+    "total comprehensive income", "total comprehensive loss",
+}
 
-    Works generically: for each numeric column, when a 'total' row is reached,
-    the values since the previous total (a section) should sum to it.
+
+def _note_columns(table):
+    """Column indexes that are 'Note' reference columns (values like 7, 8, 9)."""
+    skip = set()
+    for row in table.rows:
+        cells = [c.text.strip().lower() for c in row.cells]
+        for i, txt in enumerate(cells):
+            if txt == "note":
+                skip.add(i)
+        if any(c in ("$", "2025", "2024", "2023", "2026") for c in cells):
+            break  # header row reached
+    return skip
+
+
+def check_table_totals(t_idx, table):
+    """Check each subtotal against the line items directly above it.
+
+    Conservative on purpose, to avoid false positives on real statements:
+    - resets at blank rows and section headers (so balance-sheet sections
+      aren't summed together);
+    - never treats a 'Total' row as a line item;
+    - skips 'Note' reference columns and grand totals;
+    - treats a nil dash ('-') as zero, not a section break;
+    - flags a sign/brackets inconsistency when the sum equals the stated
+      figure in magnitude but the signs differ (e.g. 430,872 vs (430,872)).
     """
     issues = []
     labels, numgrid = _grid(table)
     if len(numgrid) < 3:
         return issues
     ncols = max((len(r) for r in numgrid), default=0)
-    for c in range(1, ncols):  # column 0 is usually the label
-        seg = []                # numbers accumulated since last total
+    skipcols = _note_columns(table)
+    moneycols = [c for c in range(1, ncols) if c not in skipcols]
+    # A "data row" has a number in at least one money column; otherwise it is a
+    # section header / separator.
+    is_data = [
+        any(numgrid[r][c] is not None for c in moneycols if c < len(numgrid[r]))
+        for r in range(len(numgrid))
+    ]
+    for c in moneycols:
+        seg = []
         for r, label in enumerate(labels):
-            # Skip header rows (empty label) — their year numbers (2025/2024)
-            # must not be summed into the line items.
-            if not label.strip():
-                continue
+            low = label.lower().strip()
             val = numgrid[r][c] if c < len(numgrid[r]) else None
-            is_total = "total" in label.lower()
-            if is_total and val is not None and seg:
-                parts = [v for v in seg if v is not None]
-                if len(parts) >= 2:
-                    s = sum(parts)
+            if not low:                       # blank row -> section break
+                seg = []
+                continue
+            if "total" in low:                # subtotal / total line
+                if low not in GRAND_TOTALS and val is not None and len(seg) >= 2:
+                    s = sum(seg)
                     diff = s - val
-                    rel = abs(diff) / (abs(val) + 1e-9)
-                    if abs(diff) > 0.5 and val != 0 and rel < 3:
-                        issues.append({
-                            "table": t_idx + 1,
-                            "label": label.strip()[:60] or f"column {c+1}",
-                            "sum_of_parts": round(s, 2),
-                            "stated_total": round(val, 2),
-                            "difference": round(diff, 2),
-                        })
-                seg = []        # start a new section after a total
-            elif val is not None:
-                seg.append(val)
+                    if abs(diff) > 0.5 and val != 0:
+                        rel = abs(diff) / (abs(val) + 1e-9)
+                        if abs(s + val) <= 0.5:        # same size, opposite sign
+                            issues.append({
+                                "table": t_idx + 1, "label": label[:55],
+                                "sum_of_parts": round(s, 2),
+                                "stated_total": round(val, 2),
+                                "difference": round(diff, 2),
+                                "kind": "sign / brackets",
+                            })
+                        elif rel < 1.0:                # conservative arithmetic slip
+                            issues.append({
+                                "table": t_idx + 1, "label": label[:55],
+                                "sum_of_parts": round(s, 2),
+                                "stated_total": round(val, 2),
+                                "difference": round(diff, 2),
+                                "kind": "sum",
+                            })
+                seg = []
+                continue                      # never treat a total as a line item
+            if not is_data[r]:                # section header with no numbers
+                seg = []
+                continue
+            seg.append(val if val is not None else 0.0)  # nil '-' counts as 0
     return issues
 
 
@@ -292,6 +697,79 @@ def check_balance_equation(doc):
     return uniq
 
 
+def _find_row(labels, numgrid, c, *keys, exclude=()):
+    """First numeric value in column c whose label matches any key."""
+    for r, label in enumerate(labels):
+        low = label.lower()
+        if any(k in low for k in keys) and not any(x in low for x in exclude):
+            v = numgrid[r][c] if c < len(numgrid[r]) else None
+            if v is not None:
+                return v
+    return None
+
+
+def check_pl(t_idx, table):
+    """Profit & loss flow checks (only if the table looks like a P&L)."""
+    out = []
+    labels, numgrid = _grid(table)
+    low_all = " ".join(labels).lower()
+    if "gross profit" not in low_all and "gross loss" not in low_all:
+        return out
+    skip = _note_columns(table)
+    ncols = max((len(r) for r in numgrid), default=0)
+    for c in [x for x in range(1, ncols) if x not in skip]:
+        rev = _find_row(labels, numgrid, c, "revenue", "sales", "turnover", exclude=("cost",))
+        cogs = _find_row(labels, numgrid, c, "cost of goods", "cost of sales")
+        gp = _find_row(labels, numgrid, c, "gross profit", "gross loss")
+        pbt = _find_row(labels, numgrid, c, "before tax", "before taxation")
+        tax = _find_row(labels, numgrid, c, "income tax", "tax expense", "taxation")
+        net = _find_row(labels, numgrid, c, "for the financial year", "for the year",
+                        "loss for", "profit for")
+        if rev is not None and cogs is not None and gp is not None:
+            exp = rev + cogs if cogs < 0 else rev - cogs
+            if abs(exp - gp) > 0.5:
+                out.append({"table": t_idx + 1,
+                            "check": "Gross profit = Revenue − Cost of sales",
+                            "expected": round(exp, 2), "stated": round(gp, 2),
+                            "difference": round(exp - gp, 2)})
+        if net is not None and pbt is not None:
+            tx = tax or 0
+            exp = pbt + tx if (tax is None or tx < 0) else pbt - tx
+            if abs(exp - net) > 0.5:
+                out.append({"table": t_idx + 1,
+                            "check": "Loss/profit for year = Before tax − Tax",
+                            "expected": round(exp, 2), "stated": round(net, 2),
+                            "difference": round(exp - net, 2)})
+    return out
+
+
+def check_row_totals(t_idx, table):
+    """Horizontal check: when the LAST column is a 'Total' column, each row's
+    components should add across to it (e.g. Statement of Changes in Equity)."""
+    out = []
+    labels, numgrid = _grid(table)
+    last_is_total = False
+    for row in table.rows:
+        cells = [c.text.strip().lower() for c in row.cells]
+        if cells and "total" in cells[-1]:
+            last_is_total = True
+            break
+    if not last_is_total:
+        return out
+    ncols = max((len(r) for r in numgrid), default=0)
+    for r in range(len(numgrid)):
+        row = numgrid[r]
+        comps = [v for v in row[1:ncols - 1] if v is not None]
+        tot = row[ncols - 1] if ncols - 1 < len(row) else None
+        if tot is not None and len(comps) >= 2 and abs(sum(comps) - tot) > 0.5:
+            out.append({"table": t_idx + 1,
+                        "row": (labels[r][:40] or f"row {r + 1}"),
+                        "sum_across": round(sum(comps), 2),
+                        "stated_total": round(tot, 2),
+                        "difference": round(sum(comps) - tot, 2)})
+    return out
+
+
 def check_language(doc):
     """British-English and common-typo checks across all paragraphs."""
     issues = []
@@ -329,6 +807,103 @@ def check_frs(full_text_low, has_inventory):
     return out
 
 
+# --------------------------------------------------------------------------
+# AI review (Claude) — the judgement half: FRS compliance + grammar + summary.
+# The deterministic checks above handle the arithmetic; this adds the reasoning.
+# Requires the ANTHROPIC_API_KEY environment variable. Skips gracefully if unset.
+# --------------------------------------------------------------------------
+AI_MODEL = os.environ.get("FS_REVIEW_MODEL", "claude-haiku-4-5-20251001")
+
+AI_PROMPT = """You are a Singapore financial-statements reviewer reviewing the \
+unaudited financial statements of a Singapore-incorporated company. The arithmetic \
+has ALREADY been independently verified by a separate program, so do NOT re-check \
+sums — focus on disclosure judgement and language.
+
+Review the extracted financial statements below and report:
+
+1. FRS compliance against Singapore FRS 1 (going concern adequacy when there are \
+accumulated losses/net current liabilities; significant judgements & estimates; \
+standards issued-but-not-yet-effective dates correct for the financial year), \
+FRS 2 (inventory cost formula, only if inventory exists), FRS 12 (deferred tax / \
+unutilised tax losses recognised or disclosed with amounts), FRS 109 (financial \
+instruments note includes ONLY financial instruments — not prepayments, inventory \
+or tax), FRS 115 (revenue recognition basis — over time vs point in time — clearly \
+stated and consistent), FRS 116 (leases recognised if the company leases premises).
+
+2. Grammar/typography: spelling, British vs American English (SG uses British), \
+singular/plural (Director vs Directors), defined-term capitalisation ("the Company"), \
+leftover placeholders (square brackets, blanks), and abbreviations.
+
+Return STRICT JSON only, no prose around it, in exactly this shape:
+{"frs_observations":[{"frs":"FRS 12","issue":"...","detail":"...","recommendation":"..."}],
+ "grammar_issues":[{"location":"...","current":"...","suggested":"..."}],
+ "narrative":"2-4 sentence overall summary"}
+
+If something is fine, omit it rather than inventing issues. Financial statements text:
+
+"""
+
+
+def extract_full_text(doc):
+    parts = []
+    for i, table in enumerate(doc.tables):
+        parts.append(f"\n--- TABLE {i + 1} ---")
+        for row in table.rows:
+            parts.append(" | ".join(c.text.strip() for c in row.cells))
+    for p in doc.paragraphs:
+        if p.text.strip():
+            parts.append(p.text.strip())
+    return "\n".join(parts)
+
+
+def _parse_json(raw):
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw[:4].lower() == "json":
+            raw = raw[4:]
+    s, e = raw.find("{"), raw.rfind("}")
+    if s >= 0 and e > s:
+        try:
+            return json.loads(raw[s:e + 1])
+        except Exception:
+            return {}
+    return {}
+
+
+def ai_review(extracted_text):
+    """Judgement-based review via Claude. Returns a dict with 'enabled' flag."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return {"enabled": False,
+                "error": "AI review not enabled — set ANTHROPIC_API_KEY to turn it on.",
+                "frs_observations": [], "grammar_issues": [], "narrative": ""}
+    try:
+        import anthropic
+    except Exception:
+        return {"enabled": False,
+                "error": "The 'anthropic' package is not installed (pip install anthropic).",
+                "frs_observations": [], "grammar_issues": [], "narrative": ""}
+    try:
+        client = anthropic.Anthropic(api_key=key)
+        msg = client.messages.create(
+            model=AI_MODEL,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": AI_PROMPT + extracted_text[:60000]}],
+        )
+        raw = "".join(getattr(b, "text", "") for b in msg.content)
+        data = _parse_json(raw)
+        return {
+            "enabled": True, "error": None,
+            "frs_observations": data.get("frs_observations", []),
+            "grammar_issues": data.get("grammar_issues", []),
+            "narrative": data.get("narrative", ""),
+        }
+    except Exception as e:
+        return {"enabled": False, "error": f"AI review could not run: {e}",
+                "frs_observations": [], "grammar_issues": [], "narrative": ""}
+
+
 def review_docx(path):
     """Return a dict of findings for a .docx file (rule-based, offline)."""
     findings = {
@@ -336,7 +911,10 @@ def review_docx(path):
         "sections_found": [], "sections_missing": [],
         "tables": 0, "paragraph_count": 0,
         "tally_checks": [], "balance_checks": [],
+        "pl_checks": [], "row_checks": [],
         "frs_checks": [], "language_issues": [],
+        "ai": {"enabled": False, "error": None, "frs_observations": [],
+               "grammar_issues": [], "narrative": ""},
         "warnings": [], "error": None,
     }
     try:
@@ -368,10 +946,13 @@ def review_docx(path):
 
     for t_idx, table in enumerate(doc.tables):
         findings["tally_checks"].extend(check_table_totals(t_idx, table))
+        findings["pl_checks"].extend(check_pl(t_idx, table))
+        findings["row_checks"].extend(check_row_totals(t_idx, table))
 
     findings["balance_checks"] = check_balance_equation(doc)
     findings["language_issues"] = check_language(doc)
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
+    findings["ai"] = ai_review(extract_full_text(doc))
 
     findings["warnings"].append(
         "This is an automated, rule-based first pass (arithmetic, balance equation, "
@@ -397,7 +978,10 @@ def basic_review(path, ext):
         "sections_found": [], "sections_missing": [],
         "tables": 0, "paragraph_count": 0,
         "tally_checks": [], "balance_checks": [],
+        "pl_checks": [], "row_checks": [],
         "frs_checks": [], "language_issues": [],
+        "ai": {"enabled": False, "error": None, "frs_observations": [],
+               "grammar_issues": [], "narrative": ""},
     }
 
 
@@ -486,6 +1070,122 @@ def delete(rec_id):
         save_records(records)
         flash("Record deleted.", "success")
     return redirect(url_for("dashboard"))
+
+
+def build_word_report(record):
+    """Build a .docx review report from a record's findings; returns a BytesIO."""
+    import io
+    from docx import Document as _Doc
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    DARK, RED, GREEN = "1F3864", "FCE4D6", "E2EFDA"
+    f = record["findings"]
+
+    def setfont(run, size=10, bold=False, color=None):
+        run.font.name = "Arial"; run.font.size = Pt(size); run.font.bold = bold
+        if color:
+            run.font.color.rgb = RGBColor.from_string(color)
+
+    def shade(cell, hexc):
+        tcPr = cell._tc.get_or_add_tcPr(); sh = OxmlElement('w:shd')
+        sh.set(qn('w:val'), 'clear'); sh.set(qn('w:fill'), hexc); tcPr.append(sh)
+
+    def H(text, size=13):
+        p = doc.add_paragraph(); setfont(p.add_run(text), size, True, DARK)
+
+    def body(text, size=10, bold=False):
+        p = doc.add_paragraph(); setfont(p.add_run(text), size, bold)
+
+    def table(headers, rows, shades=None):
+        t = doc.add_table(rows=1, cols=len(headers)); t.style = "Table Grid"
+        for i, h in enumerate(headers):
+            c = t.rows[0].cells[i]; c.text = ""
+            setfont(c.paragraphs[0].add_run(h), 9, True, "FFFFFF"); shade(c, DARK)
+        for ri, row in enumerate(rows):
+            cells = t.add_row().cells
+            for i, v in enumerate(row):
+                cells[i].text = ""; setfont(cells[i].paragraphs[0].add_run(str(v)), 9)
+                if shades and shades[ri]:
+                    shade(cells[i], shades[ri])
+
+    doc = _Doc()
+    doc.styles["Normal"].font.name = "Arial"; doc.styles["Normal"].font.size = Pt(10)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    setfont(p.add_run("FINANCIAL STATEMENTS REVIEW REPORT"), 17, True, DARK)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    setfont(p.add_run(record["original_name"]), 11, True, "2E5496")
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    setfont(p.add_run("Reviewed " + record["uploaded_at"].replace("T", " ")), 9, False, "606060")
+
+    if f.get("error"):
+        body(f["error"]);
+    else:
+        H("Numerical & arithmetic findings")
+        if f["tally_checks"] or f["pl_checks"] or f["row_checks"] or \
+           any(not b["balanced"] for b in f["balance_checks"]):
+            rows, sh = [], []
+            for c in f["tally_checks"]:
+                rows.append([f"Table {c['table']}", c["label"],
+                             f"{c['sum_of_parts']:,.2f}", f"{c['stated_total']:,.2f}",
+                             c.get("kind", "sum")]); sh.append(RED)
+            for c in f["pl_checks"]:
+                rows.append([f"Table {c['table']}", c["check"],
+                             f"{c['expected']:,.2f}", f"{c['stated']:,.2f}", "P&L"]); sh.append(RED)
+            for c in f["row_checks"]:
+                rows.append([f"Table {c['table']}", c["row"],
+                             f"{c['sum_across']:,.2f}", f"{c['stated_total']:,.2f}", "cross-add"]); sh.append(RED)
+            for b in f["balance_checks"]:
+                if not b["balanced"]:
+                    rows.append(["Balance sheet", "Assets vs Equity+Liabilities",
+                                 f"{b['total_assets']:,.2f}", f"{b['equity_plus_liabilities']:,.2f}",
+                                 "balance"]); sh.append(RED)
+            table(["Source", "Item", "Calculated", "Reported", "Type"], rows, sh)
+        else:
+            body("All arithmetic checks passed (totals, balance equation, P&L flow, cross-adds).")
+
+        ai = f.get("ai", {})
+        if ai.get("enabled"):
+            if ai.get("narrative"):
+                H("AI summary"); body(ai["narrative"])
+            if ai.get("frs_observations"):
+                H("FRS compliance observations")
+                table(["FRS", "Issue", "Detail", "Recommendation"],
+                      [[o.get("frs", ""), o.get("issue", ""), o.get("detail", ""),
+                        o.get("recommendation", "")] for o in ai["frs_observations"]])
+            if ai.get("grammar_issues"):
+                H("Grammar & wording")
+                table(["Location", "Current", "Suggested"],
+                      [[g.get("location", ""), g.get("current", ""), g.get("suggested", "")]
+                       for g in ai["grammar_issues"]])
+        else:
+            H("AI review"); body(ai.get("error", "AI review not enabled."))
+
+        H("FRS disclosure checklist")
+        table(["FRS", "Disclosure", "Detected"],
+              [[k["frs"], k["item"], "Yes" if k["present"] else "Check"] for k in f["frs_checks"]],
+              [GREEN if k["present"] else RED for k in f["frs_checks"]])
+
+    p = doc.add_paragraph()
+    setfont(p.add_run("This automated review is a first-pass aid, not a substitute for a full "
+                      "FRS/IFRS compliance review by a qualified reviewer."), 8, False, "808080")
+    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+    return buf
+
+
+@app.route("/report/<rec_id>/report.docx")
+@login_required
+def download_report(rec_id):
+    from flask import send_file
+    record = next((r for r in load_records() if r["id"] == rec_id), None)
+    if not record:
+        abort(404)
+    buf = build_word_report(record)
+    name = os.path.splitext(record["original_name"])[0] + "_reviewed.docx"
+    return send_file(buf, as_attachment=True, download_name=name,
+                     mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 @app.template_filter("filesize")
