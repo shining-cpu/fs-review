@@ -160,8 +160,8 @@ DASHBOARD_HTML = """{% extends "base.html" %}
       <p class="muted" style="margin:10px 0 0">Choose a file, then submit.</p>
     </div>
     <div style="margin:0 0 16px">
-      <label for="acra_sc" style="font-size:13px">Registered share capital per ACRA Business Profile <span class="muted">(optional — for cross-check)</span></label>
-      <input type="text" id="acra_sc" name="acra_share_capital" placeholder="e.g. 100" style="margin-top:6px">
+      <label for="acra_bizfile" style="font-size:13px">Latest ACRA BizFile (Business Profile PDF) <span class="muted">(optional — crawled to cross-check UEN &amp; share capital)</span></label><br>
+      <input type="file" id="acra_bizfile" name="acra_bizfile" accept=".pdf" style="margin-top:6px">
     </div>
     <button class="btn" type="submit">Upload &amp; review</button>
   </form>
@@ -249,13 +249,28 @@ REPORT_HTML = """{% extends "base.html" %}
       {% endif %}
       <tr><td><strong>Share capital (per FS)</strong></td><td>{% if f.acra.fs_share_capital is not none %}{{ "{:,.2f}".format(f.acra.fs_share_capital) }}{% else %}not detected{% endif %}</td></tr>
       {% if f.acra.registered_share_capital is not none %}
-      <tr><td><strong>Share capital (per ACRA, entered)</strong></td><td>{{ "{:,.2f}".format(f.acra.registered_share_capital) }}
-        {% if f.acra.share_capital_matches %}<span class="pill good">matches</span>{% else %}<span class="pill bad">does not match</span>{% endif %}</td></tr>
+      <tr><td><strong>Share capital (per ACRA BizFile)</strong></td><td>{{ "{:,.2f}".format(f.acra.registered_share_capital) }}
+        {% if f.acra.share_capital_matches %}<span class="pill good">matches FS</span>{% else %}<span class="pill bad">does not match FS</span>{% endif %}</td></tr>
       {% endif %}
     </tbody>
   </table>
   {% endif %}
-  {% if f.acra.registered_share_capital is none %}<p class="muted" style="margin-top:10px">Share capital is not in ACRA's free data. To cross-check it, enter the figure from the paid ACRA Business Profile in the upload form.</p>{% endif %}
+  {% if f.acra.bizfile %}
+    {% set bz = f.acra.bizfile %}
+    {% if bz.error %}<p class="muted" style="margin-top:10px">BizFile: {{ bz.error }}</p>{% endif %}
+    {% if bz.entity_name or bz.status or bz.shareholders or bz.issued_share_capital is not none %}
+    <p style="margin-top:12px"><strong>Crawled from the uploaded ACRA BizFile</strong></p>
+    <table><tbody>
+      {% if bz.entity_name %}<tr><td style="width:38%"><strong>Name</strong></td><td>{{ bz.entity_name }}</td></tr>{% endif %}
+      {% if bz.status %}<tr><td><strong>Status</strong></td><td>{{ bz.status }}</td></tr>{% endif %}
+      {% if bz.issued_share_capital is not none %}<tr><td><strong>Issued share capital</strong></td><td>{{ "{:,.2f}".format(bz.issued_share_capital) }}</td></tr>{% endif %}
+      {% if bz.paid_up_capital is not none %}<tr><td><strong>Paid-up capital</strong></td><td>{{ "{:,.2f}".format(bz.paid_up_capital) }}</td></tr>{% endif %}
+      {% if bz.shareholders %}<tr><td><strong>Shareholders</strong></td><td>{% for s in bz.shareholders %}{{ s.name }}{% if s.shares %} ({{ s.shares }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</td></tr>{% endif %}
+    </tbody></table>
+    {% endif %}
+  {% else %}
+  <p class="muted" style="margin-top:10px">Share capital is not in ACRA's free data. Upload the latest ACRA BizFile (Business Profile PDF) on the dashboard to cross-check share capital and shareholders.</p>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -1007,6 +1022,63 @@ def acra_check(full_text):
     return out
 
 
+def crawl_bizfile(path):
+    """Extract the official figures from an uploaded ACRA Business Profile PDF
+    (UEN, name, status, issued/paid-up share capital, shareholders)."""
+    out = {"error": None, "uen": None, "entity_name": None, "status": None,
+           "issued_share_capital": None, "paid_up_capital": None,
+           "shareholders": [], "ai": False}
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    except Exception as e:
+        out["error"] = f"Could not read the BizFile PDF: {e}"
+        return out
+
+    def find_amount(label):
+        m = re.search(label + r"[^\d]{0,40}([\d,]+(?:\.\d+)?)", text, re.I)
+        return _to_number(m.group(1)) if m else None
+
+    out["issued_share_capital"] = find_amount(r"issued share capital")
+    out["paid_up_capital"] = find_amount(r"paid[\s\-]?up capital")
+    m = UEN_RE.search(text)
+    if m:
+        out["uen"] = m.group(1)
+
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=key)
+            prompt = (
+                "This is the text of a Singapore ACRA Business Profile. Extract the "
+                "official details as STRICT JSON only, in this shape: "
+                '{"uen":"","entity_name":"","status":"","issued_share_capital":0,'
+                '"paid_up_capital":0,"shareholders":[{"name":"","shares":0}]}. '
+                "Use plain numbers (no commas/$) for capital and shares. Omit a field "
+                "if not present. Text:\n\n" + text[:40000])
+            msg = client.messages.create(
+                model=AI_MODEL, max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}])
+            raw = "".join(getattr(b, "text", "") for b in msg.content)
+            data = _parse_json(raw)
+            out["ai"] = True
+            for k in ("uen", "entity_name", "status"):
+                if data.get(k):
+                    out[k] = data[k]
+            for k in ("issued_share_capital", "paid_up_capital"):
+                v = data.get(k)
+                if isinstance(v, (int, float)):
+                    out[k] = float(v)
+            if isinstance(data.get("shareholders"), list):
+                out["shareholders"] = [
+                    s for s in data["shareholders"] if isinstance(s, dict)][:20]
+        except Exception:
+            pass
+    return out
+
+
 def review_docx(path):
     """Return a dict of findings for a .docx file (rule-based, offline)."""
     findings = {
@@ -1021,7 +1093,8 @@ def review_docx(path):
         "acra": {"enabled": False, "error": None, "uen": None, "found": False,
                  "official_name": None, "status": None, "address": None,
                  "name_matches": None, "fs_share_capital": None,
-                 "registered_share_capital": None, "share_capital_matches": None},
+                 "registered_share_capital": None, "share_capital_matches": None,
+                 "bizfile": None},
         "warnings": [], "error": None,
     }
     try:
@@ -1098,7 +1171,8 @@ def basic_review(path, ext):
         "acra": {"enabled": False, "error": None, "uen": None, "found": False,
                  "official_name": None, "status": None, "address": None,
                  "name_matches": None, "fs_share_capital": None,
-                 "registered_share_capital": None, "share_capital_matches": None},
+                 "registered_share_capital": None, "share_capital_matches": None,
+                 "bizfile": None},
     }
 
 
@@ -1134,15 +1208,22 @@ def upload():
 
     findings = basic_review(stored_path, ext)
 
-    # Optional: compare FS share capital against the figure from the (paid)
-    # ACRA Business Profile, if the reviewer typed it on the upload form.
-    reg_sc = request.form.get("acra_share_capital", "").strip()
-    if reg_sc and "acra" in findings:
-        val = _to_number(reg_sc)
-        findings["acra"]["registered_share_capital"] = val
+    # Optional: crawl an uploaded ACRA Business Profile (BizFile) PDF and
+    # cross-check its share capital / UEN against the financial statements.
+    bizfile = request.files.get("acra_bizfile")
+    if bizfile and bizfile.filename and "acra" in findings:
+        bz_name = secure_filename(bizfile.filename)
+        bz_path = os.path.join(UPLOAD_DIR, f"{rec_id}_bizfile_{bz_name}")
+        bizfile.save(bz_path)
+        bz = crawl_bizfile(bz_path)
+        findings["acra"]["bizfile"] = bz
+        reg = bz.get("paid_up_capital")
+        if reg is None:
+            reg = bz.get("issued_share_capital")
+        findings["acra"]["registered_share_capital"] = reg
         fs_sc = findings["acra"].get("fs_share_capital")
-        if val is not None and fs_sc is not None:
-            findings["acra"]["share_capital_matches"] = abs(val - fs_sc) <= 0.5
+        if reg is not None and fs_sc is not None:
+            findings["acra"]["share_capital_matches"] = abs(reg - fs_sc) <= 0.5
 
     record = {
         "id": rec_id,
