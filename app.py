@@ -194,26 +194,33 @@ DASHBOARD_HTML = """{% extends "base.html" %}
              style="font-size:15px">
     </div>
     <script>
-    (function(){
-      var dz = document.getElementById('dz'), fi = document.getElementById('fileInput');
-      if(!dz || !fi) return;
-      ['dragover','dragenter'].forEach(function(ev){
-        dz.addEventListener(ev, function(e){ e.preventDefault();
-          dz.style.background = '#eef2ff'; dz.style.borderColor = '#1d4ed8'; });
-      });
-      ['dragleave','drop'].forEach(function(ev){
-        dz.addEventListener(ev, function(e){ e.preventDefault();
-          dz.style.background = ''; dz.style.borderColor = ''; });
-      });
-      dz.addEventListener('drop', function(e){
-        e.preventDefault();
-        if(e.dataTransfer && e.dataTransfer.files.length){ fi.files = e.dataTransfer.files; }
-      });
-    })();
+    document.addEventListener('DOMContentLoaded', function(){
+      function wire(zoneId, inputId){
+        var dz = document.getElementById(zoneId), fi = document.getElementById(inputId);
+        if(!dz || !fi) return;
+        ['dragover','dragenter'].forEach(function(ev){
+          dz.addEventListener(ev, function(e){ e.preventDefault();
+            dz.style.background = '#eef2ff'; dz.style.borderColor = '#1d4ed8'; });
+        });
+        ['dragleave','drop'].forEach(function(ev){
+          dz.addEventListener(ev, function(e){ e.preventDefault();
+            dz.style.background = ''; dz.style.borderColor = ''; });
+        });
+        dz.addEventListener('drop', function(e){
+          e.preventDefault();
+          if(e.dataTransfer && e.dataTransfer.files.length){ fi.files = e.dataTransfer.files; }
+        });
+      }
+      wire('dz', 'fileInput');
+      wire('dzb', 'bizInput');
+    });
     </script>
     <div style="margin:0 0 16px">
-      <label for="acra_bizfile" style="font-size:13px">Latest ACRA BizFile (Business Profile PDF) <span class="muted">(optional — crawled to cross-check UEN &amp; share capital)</span></label><br>
-      <input type="file" id="acra_bizfile" name="acra_bizfile" accept=".pdf" style="margin-top:6px">
+      <label style="font-size:13px">Latest ACRA BizFile (Business Profile PDF) <span class="muted">(optional — crawled to cross-check UEN, share capital &amp; directors)</span></label>
+      <div class="dropzone" id="dzb" style="margin-top:6px">
+        <p class="muted" style="margin:0 0 10px">Drag &amp; drop the ACRA BizFile PDF here, or choose a file:</p>
+        <input type="file" id="bizInput" name="acra_bizfile" accept=".pdf" style="font-size:15px">
+      </div>
     </div>
     <button class="btn" type="submit">Upload &amp; review</button>
   </form>
