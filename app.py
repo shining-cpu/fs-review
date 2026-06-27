@@ -18,6 +18,7 @@ import io
 import re
 import json
 import uuid
+import secrets
 import datetime as dt
 from functools import wraps
 
@@ -59,6 +60,15 @@ app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 8  # 8 hours
 # survive restarts/redeploys. Without it, the app falls back to JSON files.
 DATABASE_URL = os.environ.get("DATABASE_URL")
 USE_DB = bool(DATABASE_URL)
+
+# Passwordless magic-link login (email a one-time link). Active only when a
+# database is connected (to store the one-time tokens) AND a Resend API key is
+# set (to send the email). Otherwise the app stays on username/password login.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+MAIL_FROM = os.environ.get("MAIL_FROM", "FS Review <onboarding@resend.dev>")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+MAGIC_LOGIN = USE_DB and bool(RESEND_API_KEY)
+TOKEN_TTL_MIN = 20  # magic-link validity, minutes
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +133,7 @@ BASE_HTML = """<!DOCTYPE html>
     <div class="brand">FS Review Portal</div>
     <div>
       {% if session.get('user') %}
+        {% if current_is_admin %}<a href="{{ url_for('admin_users') }}" style="margin-right:14px">People</a>{% endif %}
         <span style="color:#dbeafe;font-size:14px">{{ session.get('name') }}</span>
         &nbsp;·&nbsp; <a href="{{ url_for('logout') }}">Log out</a>
       {% endif %}
@@ -144,6 +155,16 @@ LOGIN_HTML = """{% extends "base.html" %}
 {% block content %}
 <div class="card" style="max-width:420px;margin:40px auto">
   <h1>Sign in</h1>
+  {% if magic %}
+  <p class="muted">Enter your email and we'll send you a one-time sign-in link. Only invited people can sign in.</p>
+  <form method="post" action="{{ url_for('login') }}" style="margin-top:16px">
+    <div style="margin-bottom:20px">
+      <label for="email">Email</label>
+      <input type="text" id="email" name="email" autocomplete="email" required autofocus>
+    </div>
+    <button class="btn" type="submit" style="width:100%">Email me a sign-in link</button>
+  </form>
+  {% else %}
   <p class="muted">Enter your credentials to access the FS review portal.</p>
   <form method="post" action="{{ url_for('login') }}" style="margin-top:16px">
     <div style="margin-bottom:14px">
@@ -156,6 +177,7 @@ LOGIN_HTML = """{% extends "base.html" %}
     </div>
     <button class="btn" type="submit" style="width:100%">Sign in</button>
   </form>
+  {% endif %}
 </div>
 {% endblock %}"""
 
@@ -459,11 +481,42 @@ REPORT_HTML = """{% extends "base.html" %}
 </form>
 {% endblock %}"""
 
+ADMIN_HTML = """{% extends "base.html" %}
+{% block title %}People · FS Review{% endblock %}
+{% block content %}
+<div class="card">
+  <p class="muted"><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
+  <h1>Invited people</h1>
+  <p class="muted">{% if magic %}Anyone listed here can request a one-time sign-in link by email. No one else can sign in.{% else %}Portal user accounts.{% endif %}</p>
+  <form method="post" action="{{ url_for('admin_invite') }}" style="margin:16px 0">
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <input type="text" name="name" placeholder="Full name" style="flex:1;min-width:150px">
+      <input type="text" name="email" placeholder="email@company.com" required style="flex:1;min-width:200px">
+      <button class="btn" type="submit">Invite</button>
+    </div>
+  </form>
+  <table>
+    <thead><tr><th>Name</th><th>Email / username</th><th></th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr><td>{{ u.name }}</td><td>{{ u.username }}</td>
+        <td>{% if u.username != admin_email and u.username != 'admin' %}
+          <form method="post" action="{{ url_for('admin_remove') }}" onsubmit="return confirm('Remove this person?')" style="margin:0">
+            <input type="hidden" name="email" value="{{ u.username }}">
+            <button class="btn danger" type="submit">Remove</button>
+          </form>{% else %}<span class="muted">admin</span>{% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}"""
+
 app.jinja_loader = DictLoader({
     "base.html": BASE_HTML,
     "login.html": LOGIN_HTML,
     "dashboard.html": DASHBOARD_HTML,
     "report.html": REPORT_HTML,
+    "admin.html": ADMIN_HTML,
 })
 
 
@@ -534,11 +587,19 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS records ("
                 "id TEXT PRIMARY KEY, original_name TEXT, ext TEXT, size_bytes BIGINT, "
                 "uploaded_by TEXT, uploaded_at TEXT, findings JSONB, file_bytes BYTEA)")
+    cur.execute("CREATE TABLE IF NOT EXISTS login_tokens ("
+                "token TEXT PRIMARY KEY, email TEXT, name TEXT, expires_at TEXT)")
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
         pw = os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")
         cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s)",
                     ("admin", generate_password_hash(pw), "Administrator"))
+    # For magic-link login, the allow-list IS the users table (keyed by email).
+    # Seed the admin email so the owner can always request a link.
+    if ADMIN_EMAIL:
+        cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s) "
+                    "ON CONFLICT (username) DO NOTHING",
+                    (ADMIN_EMAIL, "", "Administrator"))
     conn.commit()
     cur.close()
     conn.close()
@@ -571,6 +632,56 @@ def add_user(username, password, name):
         users = load_users()
         users[username] = {"password_hash": generate_password_hash(password), "name": name}
         _save(USERS_FILE, users)
+
+
+def invite_user(email, name):
+    """Add an email to the magic-link allow-list (no password)."""
+    email = email.strip().lower()
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s) "
+                    "ON CONFLICT (username) DO UPDATE SET name=EXCLUDED.name",
+                    (email, "", name))
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        users = load_users()
+        users[email] = {"password_hash": "", "name": name}
+        _save(USERS_FILE, users)
+
+
+def list_all_users():
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT username, name FROM users ORDER BY username")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [{"username": r[0], "name": r[1]} for r in rows]
+    return [{"username": u, "name": v.get("name", "")} for u, v in load_users().items()]
+
+
+def remove_user(email):
+    email = email.strip().lower()
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM users WHERE username=%s", (email,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        users = load_users()
+        users.pop(email, None)
+        _save(USERS_FILE, users)
+
+
+def is_admin():
+    u = (session.get("user") or "").lower()
+    return u == "admin" or (ADMIN_EMAIL and u == ADMIN_EMAIL)
 
 
 def save_record(record, file_bytes):
@@ -661,6 +772,75 @@ def delete_record(rec_id):
 
 
 # --------------------------------------------------------------------------
+# Magic-link helpers (token store in DB + email via Resend)
+# --------------------------------------------------------------------------
+def send_email(to_addr, subject, html):
+    """Send an email via the Resend API. Returns True on success."""
+    import urllib.request
+    if not RESEND_API_KEY:
+        return False
+    payload = json.dumps({
+        "from": MAIL_FROM, "to": [to_addr], "subject": subject, "html": html,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails", data=payload,
+        headers={"Authorization": "Bearer " + RESEND_API_KEY,
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status in (200, 201)
+    except Exception as e:
+        print(f"[send_email] failed: {e}")
+        return False
+
+
+def create_login_token(email, name):
+    token = secrets.token_urlsafe(32)
+    expires = (dt.datetime.utcnow() + dt.timedelta(minutes=TOKEN_TTL_MIN)).isoformat()
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO login_tokens (token, email, name, expires_at) "
+                "VALUES (%s,%s,%s,%s)", (token, email, name, expires))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return token
+
+
+def consume_login_token(token):
+    """Validate a one-time token; if good, delete it and return (email, name)."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("SELECT email, name, expires_at FROM login_tokens WHERE token=%s", (token,))
+    row = cur.fetchone()
+    result = None
+    if row:
+        email, name, expires_at = row
+        cur.execute("DELETE FROM login_tokens WHERE token=%s", (token,))
+        conn.commit()
+        try:
+            if dt.datetime.fromisoformat(expires_at) >= dt.datetime.utcnow():
+                result = (email, name)
+        except Exception:
+            result = None
+    cur.close()
+    conn.close()
+    return result
+
+
+# Simple in-memory throttle: cap magic-link requests per email (per worker).
+_link_requests = {}
+
+
+def too_many_requests(key, limit=5, window_min=15):
+    now = dt.datetime.utcnow()
+    hits = [t for t in _link_requests.get(key, []) if (now - t).total_seconds() < window_min * 60]
+    hits.append(now)
+    _link_requests[key] = hits
+    return len(hits) > limit
+
+
+# --------------------------------------------------------------------------
 # Auth
 # --------------------------------------------------------------------------
 def login_required(view):
@@ -675,16 +855,106 @@ def login_required(view):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        if MAGIC_LOGIN:
+            email = request.form.get("email", "").strip().lower()
+            if not email:
+                flash("Please enter your email.", "error")
+                return render_template("login.html", magic=True)
+            if too_many_requests(email):
+                flash("Too many requests — please wait a few minutes and try again.", "error")
+                return render_template("login.html", magic=True)
+            user = get_user(email)            # the allow-list check
+            if user:
+                token = create_login_token(email, user.get("name") or email)
+                base = (os.environ.get("APP_BASE_URL") or request.host_url).rstrip("/")
+                if base.startswith("http://"):
+                    base = "https://" + base[len("http://"):]
+                link = base + url_for("auth_token", token=token)
+                send_email(
+                    email, "Your FS Review sign-in link",
+                    f"<p>Hello,</p><p>Click below to sign in to the FS Review portal:</p>"
+                    f'<p><a href="{link}">Sign in to FS Review</a></p>'
+                    f"<p>This link expires in {TOKEN_TTL_MIN} minutes. "
+                    f"If you didn't request it, you can ignore this email.</p>")
+            # Same message either way — don't reveal whether the email is invited.
+            flash("If your email is on the invite list, a sign-in link is on its way. "
+                  "Check your inbox.", "success")
+            return render_template("login.html", magic=True)
+
+        # Username + password mode (used until magic-link is configured)
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         user = get_user(username)
-        if user and check_password_hash(user["password_hash"], password):
+        if user and user.get("password_hash") and \
+                check_password_hash(user["password_hash"], password):
             session["user"] = username
             session["name"] = user.get("name", username)
-            nxt = request.args.get("next") or url_for("dashboard")
-            return redirect(nxt)
+            return redirect(request.args.get("next") or url_for("dashboard"))
         flash("Invalid username or password.", "error")
-    return render_template("login.html")
+    return render_template("login.html", magic=MAGIC_LOGIN)
+
+
+@app.route("/auth/<token>")
+def auth_token(token):
+    got = consume_login_token(token) if MAGIC_LOGIN else None
+    if got:
+        email, name = got
+        session["user"] = email
+        session["name"] = name or email
+        return redirect(url_for("dashboard"))
+    flash("That sign-in link is invalid or has expired — please request a new one.", "error")
+    return redirect(url_for("login"))
+
+
+@app.route("/admin")
+@login_required
+def admin_users():
+    if not is_admin():
+        abort(403)
+    return render_template("admin.html", users=list_all_users(),
+                           magic=MAGIC_LOGIN, admin_email=ADMIN_EMAIL)
+
+
+@app.route("/admin/invite", methods=["POST"])
+@login_required
+def admin_invite():
+    if not is_admin():
+        abort(403)
+    email = request.form.get("email", "").strip().lower()
+    name = request.form.get("name", "").strip() or email
+    if email:
+        invite_user(email, name)
+        flash(f"Invited {email}.", "success")
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/remove", methods=["POST"])
+@login_required
+def admin_remove():
+    if not is_admin():
+        abort(403)
+    email = request.form.get("email", "").strip().lower()
+    if email and email != (ADMIN_EMAIL or "") and email != "admin":
+        remove_user(email)
+        flash(f"Removed {email}.", "success")
+    return redirect(url_for("admin_users"))
+
+
+@app.context_processor
+def inject_globals():
+    return {"current_is_admin": is_admin()}
+
+
+@app.after_request
+def set_security_headers(resp):
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return resp
 
 
 @app.route("/logout")
