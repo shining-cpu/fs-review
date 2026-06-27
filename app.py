@@ -188,11 +188,29 @@ DASHBOARD_HTML = """{% extends "base.html" %}
   <h1>Upload financial statements</h1>
   <p class="muted">Allowed file types: .docx, .pdf, .xlsx, .xls — max 25 MB. A review report is generated on upload.</p>
   <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
-    <div class="dropzone">
-      <input type="file" name="file" accept=".docx,.pdf,.xlsx,.xls" required
+    <div class="dropzone" id="dz">
+      <p class="muted" style="margin:0 0 10px">Drag &amp; drop your financial statements here, or choose a file:</p>
+      <input type="file" id="fileInput" name="file" accept=".docx,.pdf,.xlsx,.xls" required
              style="font-size:15px">
-      <p class="muted" style="margin:10px 0 0">Choose a file, then submit.</p>
     </div>
+    <script>
+    (function(){
+      var dz = document.getElementById('dz'), fi = document.getElementById('fileInput');
+      if(!dz || !fi) return;
+      ['dragover','dragenter'].forEach(function(ev){
+        dz.addEventListener(ev, function(e){ e.preventDefault();
+          dz.style.background = '#eef2ff'; dz.style.borderColor = '#1d4ed8'; });
+      });
+      ['dragleave','drop'].forEach(function(ev){
+        dz.addEventListener(ev, function(e){ e.preventDefault();
+          dz.style.background = ''; dz.style.borderColor = ''; });
+      });
+      dz.addEventListener('drop', function(e){
+        e.preventDefault();
+        if(e.dataTransfer && e.dataTransfer.files.length){ fi.files = e.dataTransfer.files; }
+      });
+    })();
+    </script>
     <div style="margin:0 0 16px">
       <label for="acra_bizfile" style="font-size:13px">Latest ACRA BizFile (Business Profile PDF) <span class="muted">(optional — crawled to cross-check UEN &amp; share capital)</span></label><br>
       <input type="file" id="acra_bizfile" name="acra_bizfile" accept=".pdf" style="margin-top:6px">
@@ -292,7 +310,7 @@ REPORT_HTML = """{% extends "base.html" %}
   {% if f.acra.bizfile %}
     {% set bz = f.acra.bizfile %}
     {% if bz.error %}<p class="muted" style="margin-top:10px">BizFile: {{ bz.error }}</p>{% endif %}
-    {% if bz.entity_name or bz.status or bz.shareholders or bz.issued_share_capital is not none %}
+    {% if bz.entity_name or bz.status or bz.shareholders or bz.directors or bz.issued_share_capital is not none %}
     <p style="margin-top:12px"><strong>Crawled from the uploaded ACRA BizFile</strong></p>
     <table><tbody>
       {% if bz.entity_name %}<tr><td style="width:38%"><strong>Name</strong></td><td>{{ bz.entity_name }}</td></tr>{% endif %}
@@ -300,6 +318,7 @@ REPORT_HTML = """{% extends "base.html" %}
       {% if bz.issued_share_capital is not none %}<tr><td><strong>Issued share capital</strong></td><td>{{ "{:,.2f}".format(bz.issued_share_capital) }}</td></tr>{% endif %}
       {% if bz.paid_up_capital is not none %}<tr><td><strong>Paid-up capital</strong></td><td>{{ "{:,.2f}".format(bz.paid_up_capital) }}</td></tr>{% endif %}
       {% if bz.shareholders %}<tr><td><strong>Shareholders</strong></td><td>{% for s in bz.shareholders %}{{ s.name }}{% if s.shares %} ({{ s.shares }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</td></tr>{% endif %}
+      {% if bz.directors %}<tr><td><strong>Directors</strong></td><td>{% for d in bz.directors %}{{ d.name }}{% if not loop.last %}; {% endif %}{% endfor %}</td></tr>{% endif %}
     </tbody></table>
     {% endif %}
   {% else %}
@@ -405,6 +424,28 @@ REPORT_HTML = """{% extends "base.html" %}
         <td>{{ k.frs }}</td><td>{{ k.item }}</td>
         <td>{% if k.present %}<span class="pill good">Found</span>{% else %}<span class="pill warn">Not found — check</span>{% endif %}</td>
       </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  {% set gc = f.going_concern %}
+  <h2>Going concern (FRS 1 template)
+    {% if gc.has_losses and not gc.mentions_gc %}<span class="pill bad">not addressed</span>
+    {% elif gc.elements %}{% set gcmiss = gc.elements | rejectattr('present') | list %}{% if gcmiss %}<span class="pill warn">{{ gcmiss|length }} to check</span>{% else %}<span class="pill good">complete</span>{% endif %}{% endif %}</h2>
+  {% if gc.has_losses and not gc.mentions_gc %}
+    <p class="muted">Loss / net-current-liability indicators were detected but no going-concern disclosure was found — this should be addressed.</p>
+  {% elif gc.has_losses %}
+    <p class="muted">Loss / net-current-liability indicators detected, so a robust going-concern note is expected. Required elements:</p>
+  {% else %}
+    <p class="muted">Going-concern disclosure checklist:</p>
+  {% endif %}
+  <table>
+    <thead><tr><th>Element</th><th>In the note?</th></tr></thead>
+    <tbody>
+      {% for e in gc.elements %}
+      <tr><td>{{ e.element }}</td><td>{% if e.present %}<span class="pill good">Yes</span>{% else %}<span class="pill warn">Check</span>{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -1288,6 +1329,39 @@ def check_frs(full_text_low, has_inventory):
     return out
 
 
+# Going-concern disclosure template — the elements a robust FRS 1 going-concern
+# note should contain, especially where there are losses / net current liabilities.
+GC_ELEMENTS = [
+    ("Going-concern basis stated",
+     ["going concern basis", "prepared on a going concern", "going concern assumption",
+      "basis of going concern"]),
+    ("Conditions / indicators disclosed",
+     ["net loss", "negative operating cash", "accumulated losses", "net current liabilit",
+      "incurred a loss", "net loss of", "operating cash outflow"]),
+    ("Material uncertainty acknowledged",
+     ["material uncertainty"]),
+    ("12-month assessment period stated",
+     ["twelve months", "12 months", "next twelve months", "at least twelve months"]),
+    ("Management's plans / mitigation",
+     ["cost containment", "cost-containment", "shareholder support", "continued financial support",
+      "continuing financial support", "additional financing", "funding", "financial support"]),
+    ("Conclusion that the basis is appropriate",
+     ["consider this basis to be appropriate", "appropriate", "able to pay its debts",
+      "continue as a going concern", "able to continue"]),
+]
+
+
+def check_going_concern(full_text_low):
+    """Template check for the going-concern disclosure."""
+    mentions_gc = "going concern" in full_text_low
+    has_losses = any(k in full_text_low for k in (
+        "accumulated losses", "net loss", "net current liabilit",
+        "incurred a loss", "negative operating cash", "operating cash outflow"))
+    elements = [{"element": label, "present": any(k in full_text_low for k in kws)}
+                for label, kws in GC_ELEMENTS]
+    return {"mentions_gc": mentions_gc, "has_losses": has_losses, "elements": elements}
+
+
 # --------------------------------------------------------------------------
 # AI review (Claude) — the judgement half: FRS compliance + grammar + summary.
 # The deterministic checks above handle the arithmetic; this adds the reasoning.
@@ -1459,7 +1533,7 @@ def crawl_bizfile(path):
     (UEN, name, status, issued/paid-up share capital, shareholders)."""
     out = {"error": None, "uen": None, "entity_name": None, "status": None,
            "issued_share_capital": None, "paid_up_capital": None,
-           "shareholders": [], "ai": False}
+           "shareholders": [], "directors": [], "ai": False}
     try:
         from pypdf import PdfReader
         reader = PdfReader(path)
@@ -1487,7 +1561,8 @@ def crawl_bizfile(path):
                 "This is the text of a Singapore ACRA Business Profile. Extract the "
                 "official details as STRICT JSON only, in this shape: "
                 '{"uen":"","entity_name":"","status":"","issued_share_capital":0,'
-                '"paid_up_capital":0,"shareholders":[{"name":"","shares":0}]}. '
+                '"paid_up_capital":0,"shareholders":[{"name":"","shares":0}],'
+                '"directors":[{"name":""}]}. '
                 "Use plain numbers (no commas/$) for capital and shares. Omit a field "
                 "if not present. Text:\n\n" + text[:40000])
             msg = client.messages.create(
@@ -1506,6 +1581,9 @@ def crawl_bizfile(path):
             if isinstance(data.get("shareholders"), list):
                 out["shareholders"] = [
                     s for s in data["shareholders"] if isinstance(s, dict)][:20]
+            if isinstance(data.get("directors"), list):
+                out["directors"] = [
+                    d for d in data["directors"] if isinstance(d, dict)][:20]
         except Exception:
             pass
     return out
@@ -1527,6 +1605,7 @@ def review_docx(path):
                  "name_matches": None, "fs_share_capital": None,
                  "registered_share_capital": None, "share_capital_matches": None,
                  "bizfile": None},
+        "going_concern": {"mentions_gc": False, "has_losses": False, "elements": []},
         "warnings": [], "error": None,
     }
     try:
@@ -1564,6 +1643,7 @@ def review_docx(path):
     findings["balance_checks"] = check_balance_equation(doc)
     findings["language_issues"] = check_language(doc)
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
+    findings["going_concern"] = check_going_concern(full_text_low)
     findings["ai"] = ai_review(extract_full_text(doc))
 
     acra = acra_check(extract_full_text(doc))
@@ -1605,6 +1685,7 @@ def basic_review(path, ext):
                  "name_matches": None, "fs_share_capital": None,
                  "registered_share_capital": None, "share_capital_matches": None,
                  "bizfile": None},
+        "going_concern": {"mentions_gc": False, "has_losses": False, "elements": []},
     }
 
 
@@ -1820,6 +1901,13 @@ def build_word_report(record):
         table(["FRS", "Disclosure", "Detected"],
               [[k["frs"], k["item"], "Yes" if k["present"] else "Check"] for k in f["frs_checks"]],
               [GREEN if k["present"] else RED for k in f["frs_checks"]])
+
+        gc = f.get("going_concern", {})
+        if gc.get("elements"):
+            H("Going concern (FRS 1 template)")
+            table(["Element", "In the note?"],
+                  [[e["element"], "Yes" if e["present"] else "Check"] for e in gc["elements"]],
+                  [GREEN if e["present"] else RED for e in gc["elements"]])
 
     p = doc.add_paragraph()
     setfont(p.add_run("This automated review is a first-pass aid, not a substitute for a full "
