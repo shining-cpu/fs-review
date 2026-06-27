@@ -1386,22 +1386,35 @@ def ai_complete(prompt, max_tokens=4000):
     """Call the configured LLM and return its text, or None. Prefers Gemini
     (free tier) when GEMINI_API_KEY is set, else falls back to Anthropic."""
     if GEMINI_API_KEY:
-        import urllib.request
+        import urllib.request, urllib.error
+        key = GEMINI_API_KEY.strip()
+        # Auth via the x-goog-api-key header (required for the newer AQ.-prefixed
+        # auth keys; also works for legacy AIza standard keys). The ?key= query
+        # param is rejected (HTTP 400) for AQ. keys.
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               + GEMINI_MODEL + ":generateContent?key=" + GEMINI_API_KEY)
+               + GEMINI_MODEL + ":generateContent")
         body = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
         }).encode("utf-8")
         req = urllib.request.Request(url, data=body,
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json",
+                                              "x-goog-api-key": key})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 data = json.loads(r.read().decode("utf-8"))
             parts = data["candidates"][0]["content"]["parts"]
             return "".join(p.get("text", "") for p in parts)
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8", "replace")
+            except Exception:
+                err_body = ""
+            print(f"[ai_complete gemini] HTTP {e.code} model={GEMINI_MODEL} "
+                  f"keylen={len(key)} prefix={key[:4]} :: {err_body[:600]}")
+            return None
         except Exception as e:
-            print(f"[ai_complete gemini] {e}")
+            print(f"[ai_complete gemini] {type(e).__name__}: {e}")
             return None
     key = os.environ.get("ANTHROPIC_API_KEY")
     if key:
