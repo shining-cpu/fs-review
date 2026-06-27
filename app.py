@@ -1375,6 +1375,48 @@ def check_going_concern(full_text_low):
 # Requires the ANTHROPIC_API_KEY environment variable. Skips gracefully if unset.
 # --------------------------------------------------------------------------
 AI_MODEL = os.environ.get("FS_REVIEW_MODEL", "claude-haiku-4-5-20251001")
+# Free option: Google Gemini. If GEMINI_API_KEY is set it is used (free tier);
+# otherwise ANTHROPIC_API_KEY is used; otherwise the AI review is off.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+AI_ENABLED = bool(GEMINI_API_KEY or os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def ai_complete(prompt, max_tokens=4000):
+    """Call the configured LLM and return its text, or None. Prefers Gemini
+    (free tier) when GEMINI_API_KEY is set, else falls back to Anthropic."""
+    if GEMINI_API_KEY:
+        import urllib.request
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               + GEMINI_MODEL + ":generateContent?key=" + GEMINI_API_KEY)
+        body = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            parts = data["candidates"][0]["content"]["parts"]
+            return "".join(p.get("text", "") for p in parts)
+        except Exception as e:
+            print(f"[ai_complete gemini] {e}")
+            return None
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=key)
+            msg = client.messages.create(
+                model=AI_MODEL, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}])
+            return "".join(getattr(b, "text", "") for b in msg.content)
+        except Exception as e:
+            print(f"[ai_complete anthropic] {e}")
+            return None
+    return None
+
 
 AI_PROMPT = """You are a Singapore financial-statements reviewer reviewing the \
 unaudited financial statements of a Singapore-incorporated company. The arithmetic \
@@ -1434,36 +1476,23 @@ def _parse_json(raw):
 
 
 def ai_review(extracted_text):
-    """Judgement-based review via Claude. Returns a dict with 'enabled' flag."""
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
+    """Judgement-based review via the configured LLM (Gemini free tier or Claude)."""
+    if not AI_ENABLED:
         return {"enabled": False,
-                "error": "AI review not enabled — set ANTHROPIC_API_KEY to turn it on.",
+                "error": "AI review not enabled — set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY.",
                 "frs_observations": [], "grammar_issues": [], "narrative": ""}
-    try:
-        import anthropic
-    except Exception:
+    raw = ai_complete(AI_PROMPT + extracted_text[:60000])
+    if not raw:
         return {"enabled": False,
-                "error": "The 'anthropic' package is not installed (pip install anthropic).",
+                "error": "AI review could not run — check the API key (and any rate limits/credit).",
                 "frs_observations": [], "grammar_issues": [], "narrative": ""}
-    try:
-        client = anthropic.Anthropic(api_key=key)
-        msg = client.messages.create(
-            model=AI_MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": AI_PROMPT + extracted_text[:60000]}],
-        )
-        raw = "".join(getattr(b, "text", "") for b in msg.content)
-        data = _parse_json(raw)
-        return {
-            "enabled": True, "error": None,
-            "frs_observations": data.get("frs_observations", []),
-            "grammar_issues": data.get("grammar_issues", []),
-            "narrative": data.get("narrative", ""),
-        }
-    except Exception as e:
-        return {"enabled": False, "error": f"AI review could not run: {e}",
-                "frs_observations": [], "grammar_issues": [], "narrative": ""}
+    data = _parse_json(raw)
+    return {
+        "enabled": True, "error": None,
+        "frs_observations": data.get("frs_observations", []),
+        "grammar_issues": data.get("grammar_issues", []),
+        "narrative": data.get("narrative", ""),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1559,24 +1588,18 @@ def crawl_bizfile(path):
     if m:
         out["uen"] = m.group(1)
 
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=key)
-            prompt = (
-                "This is the text of a Singapore ACRA Business Profile. Extract the "
-                "official details as STRICT JSON only, in this shape: "
-                '{"uen":"","entity_name":"","status":"","issued_share_capital":0,'
-                '"paid_up_capital":0,"shareholders":[{"name":"","shares":0}],'
-                '"directors":[{"name":""}]}. '
-                "Use plain numbers (no commas/$) for capital and shares. Omit a field "
-                "if not present. Text:\n\n" + text[:40000])
-            msg = client.messages.create(
-                model=AI_MODEL, max_tokens=1500,
-                messages=[{"role": "user", "content": prompt}])
-            raw = "".join(getattr(b, "text", "") for b in msg.content)
-            data = _parse_json(raw)
+    if AI_ENABLED:
+        prompt = (
+            "This is the text of a Singapore ACRA Business Profile. Extract the "
+            "official details as STRICT JSON only, in this shape: "
+            '{"uen":"","entity_name":"","status":"","issued_share_capital":0,'
+            '"paid_up_capital":0,"shareholders":[{"name":"","shares":0}],'
+            '"directors":[{"name":""}]}. '
+            "Use plain numbers (no commas/$) for capital and shares. Omit a field "
+            "if not present. Text:\n\n" + text[:40000])
+        raw = ai_complete(prompt, max_tokens=1500)
+        data = _parse_json(raw) if raw else {}
+        if data:
             out["ai"] = True
             for k in ("uen", "entity_name", "status"):
                 if data.get(k):
@@ -1591,8 +1614,6 @@ def crawl_bizfile(path):
             if isinstance(data.get("directors"), list):
                 out["directors"] = [
                     d for d in data["directors"] if isinstance(d, dict)][:20]
-        except Exception:
-            pass
     return out
 
 
