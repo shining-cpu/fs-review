@@ -155,29 +155,22 @@ LOGIN_HTML = """{% extends "base.html" %}
 {% block content %}
 <div class="card" style="max-width:420px;margin:40px auto">
   <h1>Sign in</h1>
-  {% if magic %}
-  <p class="muted">Enter your email and we'll send you a one-time sign-in link. Only invited people can sign in.</p>
-  <form method="post" action="{{ url_for('login') }}" style="margin-top:16px">
-    <div style="margin-bottom:20px">
-      <label for="email">Email</label>
-      <input type="text" id="email" name="email" autocomplete="email" required autofocus>
-    </div>
-    <button class="btn" type="submit" style="width:100%">Email me a sign-in link</button>
-  </form>
-  {% else %}
-  <p class="muted">Enter your credentials to access the FS review portal.</p>
+  <p class="muted">Sign in with your email and password. Only invited people can sign in.</p>
   <form method="post" action="{{ url_for('login') }}" style="margin-top:16px">
     <div style="margin-bottom:14px">
-      <label for="username">Username</label>
-      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+      <label for="email">Email</label>
+      <input type="text" id="email" name="email" autocomplete="username" required autofocus>
     </div>
     <div style="margin-bottom:20px">
       <label for="password">Password</label>
-      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <input type="password" id="password" name="password" autocomplete="current-password">
     </div>
     <button class="btn" type="submit" style="width:100%">Sign in</button>
+    {% if magic %}
+    <button class="btn secondary" type="submit" name="sendlink" value="1"
+            style="width:100%;margin-top:10px">Email me a one-time link instead</button>
+    {% endif %}
   </form>
-  {% endif %}
 </div>
 {% endblock %}"""
 
@@ -556,20 +549,23 @@ ADMIN_HTML = """{% extends "base.html" %}
 {% block content %}
 <div class="card">
   <p class="muted"><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
-  <h1>Invited people</h1>
-  <p class="muted">{% if magic %}Anyone listed here can request a one-time sign-in link by email. No one else can sign in.{% else %}Portal user accounts.{% endif %}</p>
+  <h1>People who can sign in</h1>
+  <p class="muted">Only people listed here can access the portal. Set a password to give someone a direct email + password login, and share it with them.{% if magic %} Or leave the password blank — they can then request a one-time sign-in link by email.{% endif %}</p>
   <form method="post" action="{{ url_for('admin_invite') }}" style="margin:16px 0">
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <input type="text" name="name" placeholder="Full name" style="flex:1;min-width:150px">
-      <input type="text" name="email" placeholder="email@company.com" required style="flex:1;min-width:200px">
-      <button class="btn" type="submit">Invite</button>
+      <input type="text" name="name" placeholder="Full name" style="flex:1;min-width:130px">
+      <input type="text" name="email" placeholder="email@company.com" required style="flex:1;min-width:180px">
+      <input type="text" name="password" placeholder="Set a password" style="flex:1;min-width:140px">
+      <button class="btn" type="submit">Add person</button>
     </div>
+    <p class="muted" style="margin-top:8px;font-size:13px">Tip: pick a password, click "Add person", then send the person their email + password so they can sign in.</p>
   </form>
   <table>
-    <thead><tr><th>Name</th><th>Email / username</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Email / username</th><th>Login</th><th></th></tr></thead>
     <tbody>
       {% for u in users %}
       <tr><td>{{ u.name }}</td><td>{{ u.username }}</td>
+        <td>{% if u.has_password %}<span class="pill good">Password</span>{% else %}<span class="pill warn">Email link</span>{% endif %}</td>
         <td>{% if u.username != admin_email and u.username != 'admin' %}
           <form method="post" action="{{ url_for('admin_remove') }}" onsubmit="return confirm('Remove this person?')" style="margin:0">
             <input type="hidden" name="email" value="{{ u.username }}">
@@ -704,21 +700,31 @@ def add_user(username, password, name):
         _save(USERS_FILE, users)
 
 
-def invite_user(email, name):
-    """Add an email to the magic-link allow-list (no password)."""
+def invite_user(email, name, password=""):
+    """Add an email to the allow-list. If a password is given, the person can
+    sign in with email + password right away (no email needed). If left blank,
+    they must use the one-time email sign-in link (when that's enabled)."""
     email = email.strip().lower()
+    pw_hash = generate_password_hash(password) if password else ""
     if USE_DB:
         conn = _db()
         cur = conn.cursor()
-        cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s) "
-                    "ON CONFLICT (username) DO UPDATE SET name=EXCLUDED.name",
-                    (email, "", name))
+        # Update the name always; only overwrite the password when a new one is given
+        # (so re-adding someone without a password doesn't wipe their existing one).
+        cur.execute(
+            "INSERT INTO users (username, password_hash, name) VALUES (%s,%s,%s) "
+            "ON CONFLICT (username) DO UPDATE SET name=EXCLUDED.name, "
+            "password_hash = CASE WHEN EXCLUDED.password_hash <> '' "
+            "THEN EXCLUDED.password_hash ELSE users.password_hash END",
+            (email, pw_hash, name))
         conn.commit()
         cur.close()
         conn.close()
     else:
         users = load_users()
-        users[email] = {"password_hash": "", "name": name}
+        existing = users.get(email, {})
+        users[email] = {"password_hash": pw_hash or existing.get("password_hash", ""),
+                        "name": name}
         _save(USERS_FILE, users)
 
 
@@ -726,12 +732,14 @@ def list_all_users():
     if USE_DB:
         conn = _db()
         cur = conn.cursor()
-        cur.execute("SELECT username, name FROM users ORDER BY username")
+        cur.execute("SELECT username, name, password_hash FROM users ORDER BY username")
         rows = cur.fetchall()
         cur.close()
         conn.close()
-        return [{"username": r[0], "name": r[1]} for r in rows]
-    return [{"username": u, "name": v.get("name", "")} for u, v in load_users().items()]
+        return [{"username": r[0], "name": r[1], "has_password": bool(r[2])} for r in rows]
+    return [{"username": u, "name": v.get("name", ""),
+             "has_password": bool(v.get("password_hash"))}
+            for u, v in load_users().items()]
 
 
 def remove_user(email):
@@ -936,23 +944,37 @@ def login_required(view):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        if MAGIC_LOGIN:
-            email = request.form.get("email", "").strip().lower()
-            if not email:
-                flash("Please enter your email.", "error")
-                return render_template("login.html", magic=True)
-            if too_many_requests(email):
+        # The identifier may come from either the email field or the legacy
+        # username field. Password is optional (blank = request an email link).
+        ident = (request.form.get("email") or request.form.get("username") or "").strip().lower()
+        password = request.form.get("password", "")
+        send_link = request.form.get("sendlink")
+
+        # 1) Password sign-in — works for anyone whose account has a password set.
+        if password and not send_link:
+            user = get_user(ident)
+            if user and user.get("password_hash") and \
+                    check_password_hash(user["password_hash"], password):
+                session["user"] = ident
+                session["name"] = user.get("name", ident)
+                return redirect(request.args.get("next") or url_for("dashboard"))
+            flash("Invalid email or password.", "error")
+            return render_template("login.html", magic=MAGIC_LOGIN)
+
+        # 2) One-time email sign-in link (only when magic-link is configured).
+        if MAGIC_LOGIN and ident:
+            if too_many_requests(ident):
                 flash("Too many requests — please wait a few minutes and try again.", "error")
                 return render_template("login.html", magic=True)
-            user = get_user(email)            # the allow-list check
+            user = get_user(ident)            # the allow-list check
             if user:
-                token = create_login_token(email, user.get("name") or email)
+                token = create_login_token(ident, user.get("name") or ident)
                 base = (os.environ.get("APP_BASE_URL") or request.host_url).rstrip("/")
                 if base.startswith("http://"):
                     base = "https://" + base[len("http://"):]
                 link = base + url_for("auth_token", token=token)
                 send_email(
-                    email, "Your FS Review sign-in link",
+                    ident, "Your FS Review sign-in link",
                     f"<p>Hello,</p><p>Click below to sign in to the FS Review portal:</p>"
                     f'<p><a href="{link}">Sign in to FS Review</a></p>'
                     f"<p>This link expires in {TOKEN_TTL_MIN} minutes. "
@@ -960,18 +982,9 @@ def login():
             # Same message either way — don't reveal whether the email is invited.
             flash("If your email is on the invite list, a sign-in link is on its way. "
                   "Check your inbox.", "success")
-            return render_template("login.html", magic=True)
+            return render_template("login.html", magic=MAGIC_LOGIN)
 
-        # Username + password mode (used until magic-link is configured)
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        user = get_user(username)
-        if user and user.get("password_hash") and \
-                check_password_hash(user["password_hash"], password):
-            session["user"] = username
-            session["name"] = user.get("name", username)
-            return redirect(request.args.get("next") or url_for("dashboard"))
-        flash("Invalid username or password.", "error")
+        flash("Enter your email and password to sign in.", "error")
     return render_template("login.html", magic=MAGIC_LOGIN)
 
 
@@ -1003,9 +1016,14 @@ def admin_invite():
         abort(403)
     email = request.form.get("email", "").strip().lower()
     name = request.form.get("name", "").strip() or email
+    password = request.form.get("password", "").strip()
     if email:
-        invite_user(email, name)
-        flash(f"Invited {email}.", "success")
+        invite_user(email, name, password)
+        if password:
+            flash(f"Added {email}. They can sign in now with that email and password — "
+                  f"send those details to them.", "success")
+        else:
+            flash(f"Added {email}. They can request a one-time email sign-in link.", "success")
     return redirect(url_for("admin_users"))
 
 
