@@ -1410,37 +1410,63 @@ FIN_SUPPORT_KWS = [
 ]
 
 
-def _scan_metric(doc, keys, exclude=()):
-    """First matching value across all tables, taken from that table's FIRST
-    money column (the most recent year in the standard 'Note | 2025 | 2024'
-    layout). Scans each metric independently so a figure that sits in a
-    different table/column from the others is still captured."""
+def _scan_equity(doc):
+    """Find total equity / net assets anywhere in the accounts (any table, any
+    money column), so balance-sheet insolvency is caught even when equity sits
+    apart from the current-asset lines."""
     for table in doc.tables:
         labels, numgrid = _grid(table)
         skip = _note_columns(table)
         ncols = max((len(r) for r in numgrid), default=0)
-        money = [c for c in range(1, ncols) if c not in skip]
-        if not money:
-            continue
-        v = _find_row(labels, numgrid, money[0], *keys, exclude=exclude)
-        if v is not None:
-            return v
+        for c in range(1, ncols):
+            if c in skip:
+                continue
+            v = _find_row(labels, numgrid, c,
+                          "total equity", "net assets", "net liabilities",
+                          "shareholders' equity", "shareholder's equity",
+                          exclude=("and liab", "& liab", "and liabilities"))
+            if v is not None:
+                return v
     return None
 
 
 def extract_solvency(doc):
-    """Pull solvency figures from the accounts: total equity (net assets),
-    total current assets and total current liabilities. Each is scanned
-    independently so balance-sheet insolvency (negative equity) is caught even
-    when equity sits in a different column/table from the current items."""
-    equity = _scan_metric(doc, ("total equity", "net assets", "net liabilities",
-                                "shareholders' equity", "shareholder's equity"),
-                          exclude=("and liab", "& liab", "and liabilities"))
-    ca = _scan_metric(doc, ("total current assets",))
-    cl = _scan_metric(doc, ("total current liabilities",))
-    ncd = _scan_metric(doc, ("net current asset", "net current liabilit"))
-    return {"equity": equity, "current_assets": ca,
-            "current_liabilities": cl, "net_current_direct": ncd}
+    """Pull solvency figures from the statement of financial position: total
+    equity (net assets), total current assets and total current liabilities,
+    taken from the column where the most could be located (the current year).
+    Equity is also scanned independently as a fallback so balance-sheet
+    insolvency is caught even if equity sits in another column/table."""
+    best = None  # (score, dict)
+    for table in doc.tables:
+        labels, numgrid = _grid(table)
+        low_all = " ".join(labels).lower()
+        if ("total equit" not in low_all and "net asset" not in low_all
+                and "current liabilit" not in low_all):
+            continue
+        skip = _note_columns(table)
+        ncols = max((len(r) for r in numgrid), default=0)
+        for c in range(1, ncols):
+            if c in skip:
+                continue
+            equity = _find_row(labels, numgrid, c,
+                               "total equity", "net assets", "net liabilities",
+                               "shareholders' equity", "shareholder's equity",
+                               exclude=("and liab", "& liab", "and liabilities"))
+            ca = _find_row(labels, numgrid, c, "total current assets")
+            cl = _find_row(labels, numgrid, c, "total current liabilities")
+            ncd = _find_row(labels, numgrid, c,
+                            "net current asset", "net current liabilit")
+            cand = {"equity": equity, "current_assets": ca,
+                    "current_liabilities": cl, "net_current_direct": ncd}
+            score = sum(v is not None for v in cand.values())
+            if score and (best is None or score > best[0]):
+                best = (score, cand)
+    out = best[1] if best else {"equity": None, "current_assets": None,
+                                "current_liabilities": None,
+                                "net_current_direct": None}
+    if out["equity"] is None:
+        out["equity"] = _scan_equity(doc)
+    return out
 
 
 def assess_going_concern(doc, full_text_low):
