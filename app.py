@@ -855,7 +855,11 @@ def send_email(to_addr, subject, html):
     req = urllib.request.Request(
         "https://api.resend.com/emails", data=payload,
         headers={"Authorization": "Bearer " + RESEND_API_KEY.strip(),
-                 "Content-Type": "application/json"})
+                 "Content-Type": "application/json",
+                 # Resend's API is behind Cloudflare, which blocks the default
+                 # Python-urllib client signature (Cloudflare error 1010). A normal
+                 # browser-style User-Agent gets the request through.
+                 "User-Agent": "Mozilla/5.0 (compatible; FS-Review/1.0; +https://fs-review.onrender.com)"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status in (200, 201)
