@@ -24,7 +24,7 @@ from functools import wraps
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    session, flash, send_from_directory, abort,
+    session, flash, send_from_directory, abort, Response,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -1024,7 +1024,23 @@ def set_security_headers(resp):
         "default-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
     resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Privacy: keep the whole portal out of search engines / AI crawlers.
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
+    # Lock down powerful browser features the app never uses.
+    resp.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), interest-cohort=()")
+    # Confidential financials must never be cached on shared/public computers
+    # or by intermediary proxies. Static assets can still be cached.
+    if request.path != "/robots.txt":
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        resp.headers["Pragma"] = "no-cache"
     return resp
+
+
+@app.route("/robots.txt")
+def robots_txt():
+    # Tell every crawler to stay out of the entire site.
+    return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
 
 
 @app.route("/logout")
