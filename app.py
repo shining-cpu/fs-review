@@ -846,7 +846,7 @@ def delete_record(rec_id):
 # --------------------------------------------------------------------------
 def send_email(to_addr, subject, html):
     """Send an email via the Resend API. Returns True on success."""
-    import urllib.request
+    import urllib.request, urllib.error
     if not RESEND_API_KEY:
         return False
     payload = json.dumps({
@@ -854,13 +854,20 @@ def send_email(to_addr, subject, html):
     }).encode("utf-8")
     req = urllib.request.Request(
         "https://api.resend.com/emails", data=payload,
-        headers={"Authorization": "Bearer " + RESEND_API_KEY,
+        headers={"Authorization": "Bearer " + RESEND_API_KEY.strip(),
                  "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status in (200, 201)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        print(f"[send_email] HTTP {e.code} from={MAIL_FROM} to={to_addr} :: {body[:500]}")
+        return False
     except Exception as e:
-        print(f"[send_email] failed: {e}")
+        print(f"[send_email] {type(e).__name__}: {e}")
         return False
 
 
