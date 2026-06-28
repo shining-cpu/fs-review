@@ -438,16 +438,37 @@ REPORT_HTML = """{% extends "base.html" %}
 
 <div class="card">
   {% set gc = f.going_concern %}
-  <h2>Going concern (FRS 1 template)
-    {% if gc.has_losses and not gc.mentions_gc %}<span class="pill bad">not addressed</span>
-    {% elif gc.elements %}{% set gcmiss = gc.elements | rejectattr('present') | list %}{% if gcmiss %}<span class="pill warn">{{ gcmiss|length }} to check</span>{% else %}<span class="pill good">complete</span>{% endif %}{% endif %}</h2>
-  {% if gc.has_losses and not gc.mentions_gc %}
-    <p class="muted">Loss / net-current-liability indicators were detected but no going-concern disclosure was found — this should be addressed.</p>
-  {% elif gc.has_losses %}
-    <p class="muted">Loss / net-current-liability indicators detected, so a robust going-concern note is expected. Required elements:</p>
-  {% else %}
-    <p class="muted">Going-concern disclosure checklist:</p>
+  <h2>Going concern (FRS 1)
+    {% if gc.verdict_level == 'bad' %}<span class="pill bad">risk — disclosure required</span>
+    {% elif gc.verdict_level == 'warn' %}<span class="pill warn">review</span>
+    {% elif gc.verdict_level == 'good' %}<span class="pill good">solvent</span>
+    {% endif %}</h2>
+
+  {% if gc.verdict and (gc.equity is not none or gc.net_current is not none) %}
+  <p class="muted">Solvency read from the statement of financial position:</p>
+  <table>
+    <thead><tr><th>Indicator</th><th>Amount</th><th>Read</th></tr></thead>
+    <tbody>
+      {% if gc.equity is not none %}
+      <tr><td>Total equity (net assets)</td><td>{{ "{:,.2f}".format(gc.equity) }}</td>
+          <td>{% if gc.equity < 0 %}<span class="pill bad">Net liabilities</span>{% else %}<span class="pill good">Positive</span>{% endif %}</td></tr>
+      {% endif %}
+      {% if gc.net_current is not none %}
+      <tr><td>Net current position</td><td>{{ "{:,.2f}".format(gc.net_current) }}</td>
+          <td>{% if gc.net_current < 0 %}<span class="pill bad">Net current liabilities</span>{% else %}<span class="pill good">Net current assets</span>{% endif %}</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
   {% endif %}
+
+  {% if gc.verdict %}<p style="margin-top:12px">{{ gc.verdict }}</p>{% endif %}
+
+  {% if gc.contradictions %}
+  <ul>{% for c in gc.contradictions %}<li style="color:#b91c1c">{{ c }}</li>{% endfor %}</ul>
+  {% endif %}
+
+  {% if gc.elements %}
+  <p style="margin-top:12px" class="muted">Disclosure checklist{% if gc.at_risk %} — enhanced going-concern note expected{% endif %}:</p>
   <table>
     <thead><tr><th>Element</th><th>In the note?</th></tr></thead>
     <tbody>
@@ -456,6 +477,7 @@ REPORT_HTML = """{% extends "base.html" %}
       {% endfor %}
     </tbody>
   </table>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -1369,6 +1391,143 @@ def check_going_concern(full_text_low):
     return {"mentions_gc": mentions_gc, "has_losses": has_losses, "elements": elements}
 
 
+# Phrases that show the going-concern basis is supported by external financial
+# support — what FRS 1 expects when a company is insolvent / has net current
+# liabilities and still prepares accounts on a going-concern basis.
+FIN_SUPPORT_KWS = [
+    "continued financial support", "continuing financial support",
+    "continue to provide financial support", "provide financial support",
+    "provide continuing financial support", "financial support from",
+    "financial support to", "shareholder support", "shareholders' support",
+    "shareholder's support", "will not recall", "will not demand repayment",
+    "not to recall", "undertaking to provide", "undertaken to provide",
+    "letter of support", "letter of financial support", "deed of",
+    "support from its holding", "support from the holding",
+    "support from its shareholder", "support from the shareholder",
+    "support from its director", "support from the director",
+    "funds to enable the company to meet", "meet its liabilities as and when",
+    "meet its obligations as and when", "as and when they fall due",
+]
+
+
+def extract_solvency(doc):
+    """Pull solvency figures (best column) from the statement of financial position.
+
+    Returns total equity (net assets), total current assets and total current
+    liabilities for the column where the most of these could be located
+    (normally the most recent year)."""
+    best = None  # (score, dict)
+    for table in doc.tables:
+        labels, numgrid = _grid(table)
+        low_all = " ".join(labels).lower()
+        if ("total equit" not in low_all and "net asset" not in low_all
+                and "current liabilit" not in low_all):
+            continue
+        skip = _note_columns(table)
+        ncols = max((len(r) for r in numgrid), default=0)
+        for c in range(1, ncols):
+            if c in skip:
+                continue
+            equity = _find_row(labels, numgrid, c,
+                               "total equity", "net assets", "net liabilities",
+                               "shareholders' equity", "shareholder's equity",
+                               exclude=("and liab", "& liab", "and liabilities"))
+            ca = _find_row(labels, numgrid, c, "total current assets")
+            cl = _find_row(labels, numgrid, c, "total current liabilities")
+            ncd = _find_row(labels, numgrid, c,
+                            "net current asset", "net current liabilit")
+            cand = {"equity": equity, "current_assets": ca,
+                    "current_liabilities": cl, "net_current_direct": ncd}
+            score = sum(v is not None for v in cand.values())
+            if score and (best is None or score > best[0]):
+                best = (score, cand)
+    return best[1] if best else {"equity": None, "current_assets": None,
+                                 "current_liabilities": None,
+                                 "net_current_direct": None}
+
+
+def assess_going_concern(doc, full_text_low):
+    """Going-concern review that tallies the disclosure back to the accounts.
+
+    Solvent (positive equity + net current assets, no losses) -> a standard
+    going-concern basis is fine. If the company is in a net-liabilities or
+    net-current-liabilities position, or is loss-making, the note must specify
+    the financial support it relies on (from shareholders / directors / holding
+    company), the material uncertainty, a 12-month assessment and a conclusion."""
+    base = check_going_concern(full_text_low)
+    sol = extract_solvency(doc)
+    equity = sol["equity"]
+    ca, cl = sol["current_assets"], sol["current_liabilities"]
+    net_current = None
+    if ca is not None and cl is not None:
+        net_current = round(ca - cl, 2)
+    elif sol["net_current_direct"] is not None:
+        net_current = round(sol["net_current_direct"], 2)
+
+    bs_insolvent = equity is not None and equity < 0
+    liquidity_concern = net_current is not None and net_current < 0
+    has_losses = base["has_losses"]
+    at_risk = bool(bs_insolvent or liquidity_concern or has_losses)
+    fin_support = any(k in full_text_low for k in FIN_SUPPORT_KWS)
+
+    reasons = []
+    if bs_insolvent:
+        reasons.append("a net liabilities position (total equity {:,.2f})".format(equity))
+    if liquidity_concern:
+        reasons.append("net current liabilities of {:,.2f}".format(abs(net_current)))
+    if has_losses and not (bs_insolvent or liquidity_concern):
+        reasons.append("loss / negative operating cash-flow indicators")
+
+    if not at_risk:
+        bits = []
+        if equity is not None:
+            bits.append("net assets are positive ({:,.2f})".format(equity))
+        if net_current is not None and net_current >= 0:
+            bits.append("net current assets are positive ({:,.2f})".format(net_current))
+        lead = (" and ".join(bits) + "; ") if bits else ""
+        verdict = (lead + "no loss or insolvency indicators were detected. The company "
+                   "appears solvent, so a standard going-concern basis is appropriate "
+                   "and no material-uncertainty disclosure is required. Confirm manually.")
+        verdict_level = "good"
+    else:
+        verdict = ("Going-concern RISK — " + "; ".join(reasons) + ". On a going-concern "
+                   "basis the note must specify the financial support relied on (e.g. "
+                   "continued support from shareholders / directors / the holding company "
+                   "and an undertaking not to recall amounts due), acknowledge the material "
+                   "uncertainty, state a 12-month assessment period, and give the directors' "
+                   "conclusion that the basis remains appropriate.")
+        verdict_level = "bad" if (bs_insolvent or liquidity_concern) else "warn"
+
+    contradictions = []
+    if at_risk and not base["mentions_gc"]:
+        contradictions.append(
+            "Going-concern risk indicators are present in the figures but there is no "
+            "'going concern' discussion in the notes — this must be addressed.")
+    if at_risk and not fin_support:
+        contradictions.append(
+            "The accounts show a going-concern risk but no statement of financial support "
+            "(from shareholders / directors / the holding company, or a letter of support) "
+            "was found — FRS 1 expects the support being relied on to be specified.")
+    if (not at_risk) and "material uncertainty" in full_text_low:
+        contradictions.append(
+            "The figures look solvent yet the notes flag a 'material uncertainty' over going "
+            "concern — check this is consistent with the accounts.")
+
+    base.update({
+        "equity": equity, "current_assets": ca, "current_liabilities": cl,
+        "net_current": net_current, "bs_insolvent": bs_insolvent,
+        "liquidity_concern": liquidity_concern, "at_risk": at_risk,
+        "financial_support": fin_support, "verdict": verdict,
+        "verdict_level": verdict_level, "contradictions": contradictions,
+    })
+    if at_risk:
+        base["elements"] = base["elements"] + [{
+            "element": "Financial support specified (who provides it)",
+            "present": fin_support,
+        }]
+    return base
+
+
 # --------------------------------------------------------------------------
 # AI review (Claude) — the judgement half: FRS compliance + grammar + summary.
 # The deterministic checks above handle the arithmetic; this adds the reasoning.
@@ -1438,9 +1597,19 @@ sums — focus on disclosure judgement and language.
 
 Review the extracted financial statements below and report:
 
-1. FRS compliance against Singapore FRS 1 (going concern adequacy when there are \
-accumulated losses/net current liabilities; significant judgements & estimates; \
-standards issued-but-not-yet-effective dates correct for the financial year), \
+1. FRS compliance against Singapore FRS 1. For GOING CONCERN: first read the \
+statement of financial position and decide whether the company is solvent (positive \
+net assets AND net current assets, profitable) or NOT (net liabilities / negative \
+equity, net current liabilities, or recurring losses). If it is solvent, a standard \
+going-concern basis is fine — do NOT invent a material-uncertainty issue. If it is \
+NOT solvent yet the accounts are on a going-concern basis, the note MUST specify the \
+financial support being relied on (who provides it — shareholders, directors or the \
+holding company — and whether there is an undertaking/letter of support not to recall \
+amounts due), acknowledge the material uncertainty, state a 12-month assessment period, \
+and give the directors' conclusion. Flag if any of these are missing, and flag any \
+CONTRADICTION between the going-concern narrative and the actual figures (e.g. claims \
+of solvency despite net liabilities). Also check significant judgements & estimates and \
+that standards issued-but-not-yet-effective have dates correct for the financial year), \
 FRS 2 (inventory cost formula, only if inventory exists), FRS 12 (deferred tax / \
 unutilised tax losses recognised or disclosed with amounts), FRS 109 (financial \
 instruments note includes ONLY financial instruments — not prepayments, inventory \
@@ -1684,7 +1853,7 @@ def review_docx(path):
     findings["balance_checks"] = check_balance_equation(doc)
     findings["language_issues"] = check_language(doc)
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
-    findings["going_concern"] = check_going_concern(full_text_low)
+    findings["going_concern"] = assess_going_concern(doc, full_text_low)
     findings["ai"] = ai_review(extract_full_text(doc))
 
     acra = acra_check(extract_full_text(doc))
