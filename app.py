@@ -299,10 +299,15 @@ REPORT_HTML = """{% extends "base.html" %}
       <tr><td><strong>Registration status</strong></td><td>{{ f.acra.status }}</td></tr>
       <tr><td><strong>Registered address</strong></td><td>{{ f.acra.address }}</td></tr>
       {% endif %}
-      <tr><td><strong>Share capital (per FS)</strong></td><td>{% if f.acra.fs_share_capital is not none %}{{ "{:,.2f}".format(f.acra.fs_share_capital) }}{% else %}not detected{% endif %}</td></tr>
+      <tr><td><strong>Issued &amp; paid-up share capital (per FS)</strong></td><td>{% if f.acra.fs_share_capital is not none %}${{ "{:,.2f}".format(f.acra.fs_share_capital) }}{% else %}not detected in the accounts{% endif %}</td></tr>
       {% if f.acra.registered_share_capital is not none %}
-      <tr><td><strong>Share capital (per ACRA BizFile)</strong></td><td>{{ "{:,.2f}".format(f.acra.registered_share_capital) }}
-        {% if f.acra.share_capital_matches %}<span class="pill good">matches FS</span>{% else %}<span class="pill bad">does not match FS</span>{% endif %}</td></tr>
+      <tr><td><strong>Issued &amp; paid-up share capital (per ACRA)</strong></td><td>${{ "{:,.2f}".format(f.acra.registered_share_capital) }}
+        {% if f.acra.fs_share_capital is none %}<span class="pill warn">FS figure not detected — compare manually</span>
+        {% elif f.acra.share_capital_matches %}<span class="pill good">agrees with FS</span>
+        {% else %}<span class="pill bad">differs from FS by ${{ "{:,.2f}".format((f.acra.registered_share_capital - f.acra.fs_share_capital)|abs) }}</span>{% endif %}</td></tr>
+      {% if f.acra.fs_share_capital is not none and not f.acra.share_capital_matches %}
+      <tr><td></td><td class="muted">Share capital in the accounts should equal the issued &amp; paid-up capital registered at ACRA. Reconcile before finalising — common causes are the FS showing the <em>number of shares</em> rather than the dollar amount, a share allotment made after the financial year-end, capital shown net of issue costs, or a transposition error.</td></tr>
+      {% endif %}
       {% endif %}
     </tbody>
   </table>
@@ -413,16 +418,37 @@ REPORT_HTML = """{% extends "base.html" %}
   {% endif %}
 </div>
 
+{% if f.cross_checks is defined %}
 <div class="card">
-  <h2>FRS disclosure checklist</h2>
-  <p class="muted">Keyword scan for common Singapore FRS disclosures. "Not found" doesn't always mean missing — it flags items to confirm manually.</p>
+  <h2>Cross-statement ties {% if f.cross_checks %}<span class="pill bad">{{ f.cross_checks|length }} flagged</span>{% else %}<span class="pill good">Tie up</span>{% endif %}</h2>
+  {% if f.cross_checks %}
+  <table>
+    <thead><tr><th>Check</th><th>Computed</th><th>Stated</th><th>Difference</th></tr></thead>
+    <tbody>
+      {% for c in f.cross_checks %}
+      <tr><td>{{ c.check }}</td>
+        <td>{{ "{:,.2f}".format(c.left) }}</td>
+        <td>{{ "{:,.2f}".format(c.right) }}</td>
+        <td style="color:#b91c1c">{{ "{:,.2f}".format(c.difference) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Cash-flow closing cash ties to opening plus net movement (or the lines weren't located).</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>FRS disclosure indicators</h2>
+  <p class="muted">A keyword scan for common Singapore FRS disclosures — an <em>indicator</em>, not a compliance conclusion. "Not detected" means the wording wasn't found and should be confirmed manually; the AI reviewer below assesses adequacy in context.</p>
   <table>
     <thead><tr><th>FRS</th><th>Disclosure</th><th>Detected?</th></tr></thead>
     <tbody>
       {% for k in f.frs_checks %}
       <tr>
         <td>{{ k.frs }}</td><td>{{ k.item }}</td>
-        <td>{% if k.present %}<span class="pill good">Found</span>{% else %}<span class="pill warn">Not found — check</span>{% endif %}</td>
+        <td>{% if k.present %}<span class="pill good">Detected</span>{% else %}<span class="pill warn">Not detected — confirm</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -474,24 +500,32 @@ REPORT_HTML = """{% extends "base.html" %}
 </div>
 
 <div class="card">
-  <h2>AI review — FRS judgement &amp; grammar
-    {% if f.ai.enabled %}<span class="pill good">enabled</span>{% else %}<span class="pill warn">off</span>{% endif %}</h2>
+  <h2>AI reviewer — FRS judgement &amp; drafting
+    {% if f.ai.enabled %}{% if f.ai.frs_observations %}<span class="pill warn">{{ f.ai.frs_observations|length }} observation(s)</span>{% else %}<span class="pill good">reviewed</span>{% endif %}{% else %}<span class="pill warn">off</span>{% endif %}</h2>
   {% if not f.ai.enabled %}
     <p class="muted">{{ f.ai.error }}</p>
   {% else %}
-    {% if f.ai.narrative %}<p>{{ f.ai.narrative }}</p>{% endif %}
-    <p style="margin-top:12px"><strong>FRS observations</strong></p>
+    {% if f.ai.narrative %}<p style="font-size:15px">{{ f.ai.narrative }}</p>{% endif %}
+    <p style="margin-top:14px"><strong>FRS observations</strong></p>
     {% if f.ai.frs_observations %}
     <table>
-      <thead><tr><th>FRS</th><th>Issue</th><th>Detail</th><th>Recommendation</th></tr></thead>
+      <thead><tr><th>Severity</th><th>Area</th><th>Issue &amp; detail</th><th>Recommendation</th></tr></thead>
       <tbody>
         {% for o in f.ai.frs_observations %}
-        <tr><td>{{ o.frs }}</td><td>{{ o.issue }}</td><td>{{ o.detail }}</td><td>{{ o.recommendation }}</td></tr>
+        <tr>
+          <td>{% set sev = (o.severity or '')|lower %}
+            {% if sev == 'high' %}<span class="pill bad">High</span>
+            {% elif sev == 'medium' %}<span class="pill warn">Medium</span>
+            {% elif sev == 'low' %}<span class="pill">Low</span>{% endif %}</td>
+          <td>{{ o.area or o.frs }}{% if o.frs and o.area %}<br><span class="muted">{{ o.frs }}</span>{% endif %}</td>
+          <td><strong>{{ o.issue }}</strong>{% if o.detail %}<br><span class="muted">{{ o.detail }}</span>{% endif %}</td>
+          <td>{{ o.recommendation }}</td>
+        </tr>
         {% endfor %}
       </tbody>
     </table>
-    {% else %}<p class="muted">No FRS issues raised.</p>{% endif %}
-    <p style="margin-top:12px"><strong>Grammar &amp; wording</strong></p>
+    {% else %}<p class="muted">The AI reviewer did not raise FRS observations on this set.</p>{% endif %}
+    <p style="margin-top:14px"><strong>Grammar &amp; drafting</strong></p>
     {% if f.ai.grammar_issues %}
     <table>
       <thead><tr><th>Location</th><th>Current</th><th>Suggested</th></tr></thead>
@@ -501,7 +535,7 @@ REPORT_HTML = """{% extends "base.html" %}
         {% endfor %}
       </tbody>
     </table>
-    {% else %}<p class="muted">No grammar issues raised.</p>{% endif %}
+    {% else %}<p class="muted">No drafting issues raised.</p>{% endif %}
   {% endif %}
 </div>
 
@@ -1605,97 +1639,137 @@ AI_MODEL = os.environ.get("FS_REVIEW_MODEL", "claude-haiku-4-5-20251001")
 # Free option: Google Gemini. If GEMINI_API_KEY is set it is used (free tier);
 # otherwise ANTHROPIC_API_KEY is used; otherwise the AI review is off.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-AI_ENABLED = bool(GEMINI_API_KEY or os.environ.get("ANTHROPIC_API_KEY"))
+# Default to the strong reasoning model. gemini-2.5-flash was too weak/empty for
+# real FRS judgement. Override with GEMINI_MODEL if needed (e.g. back to flash to
+# save quota). If ANTHROPIC_API_KEY is set and PREFER_CLAUDE=1, Claude is used.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+PREFER_CLAUDE = os.environ.get("PREFER_CLAUDE", "0") == "1"
+AI_ENABLED = bool(GEMINI_API_KEY or ANTHROPIC_API_KEY)
 
 
-def ai_complete(prompt, max_tokens=4000):
-    """Call the configured LLM and return its text, or None. Prefers Gemini
-    (free tier) when GEMINI_API_KEY is set, else falls back to Anthropic."""
-    if GEMINI_API_KEY:
-        import urllib.request, urllib.error
-        key = GEMINI_API_KEY.strip()
-        # Auth via the x-goog-api-key header (required for the newer AQ.-prefixed
-        # auth keys; also works for legacy AIza standard keys). The ?key= query
-        # param is rejected (HTTP 400) for AQ. keys.
-        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               + GEMINI_MODEL + ":generateContent")
-        body = json.dumps({
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
-        }).encode("utf-8")
-        req = urllib.request.Request(url, data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "x-goog-api-key": key})
+def _gemini_complete(prompt, key, max_tokens, json_out):
+    import urllib.request, urllib.error
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           + GEMINI_MODEL + ":generateContent")
+    gen = {"maxOutputTokens": max_tokens, "temperature": 0.2}
+    if json_out:
+        gen["responseMimeType"] = "application/json"   # forces clean JSON, no fences
+    body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
+                       "generationConfig": gen}).encode("utf-8")
+    req = urllib.request.Request(url, data=body,
+                                 headers={"Content-Type": "application/json",
+                                          "x-goog-api-key": key})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    cand = (data.get("candidates") or [{}])[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts)
+    if not text:
+        # Empty usually means the token budget was consumed by "thinking".
+        print(f"[ai_complete gemini] empty text; finishReason="
+              f"{cand.get('finishReason')} usage={data.get('usageMetadata')}")
+    return text or None
+
+
+def _claude_complete(prompt, key, max_tokens):
+    import anthropic
+    client = anthropic.Anthropic(api_key=key)
+    msg = client.messages.create(model=AI_MODEL, max_tokens=max_tokens,
+                                 messages=[{"role": "user", "content": prompt}])
+    return "".join(getattr(b, "text", "") for b in msg.content) or None
+
+
+def ai_complete(prompt, max_tokens=8000, json_out=False):
+    """Call the configured LLM and return its text, or None. Uses Claude when
+    PREFER_CLAUDE=1 and a key is set; otherwise Gemini (2.5-pro by default);
+    otherwise Anthropic as fallback. json_out asks Gemini for strict JSON."""
+    order = []
+    if PREFER_CLAUDE and ANTHROPIC_API_KEY:
+        order = [("claude", ANTHROPIC_API_KEY)]
+    elif GEMINI_API_KEY:
+        order = [("gemini", GEMINI_API_KEY.strip())]
+    elif ANTHROPIC_API_KEY:
+        order = [("claude", ANTHROPIC_API_KEY)]
+    for kind, key in order:
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            parts = data["candidates"][0]["content"]["parts"]
-            return "".join(p.get("text", "") for p in parts)
-        except urllib.error.HTTPError as e:
+            if kind == "gemini":
+                return _gemini_complete(prompt, key, max_tokens, json_out)
+            return _claude_complete(prompt, key, max_tokens)
+        except Exception as e:
+            body = ""
             try:
-                err_body = e.read().decode("utf-8", "replace")
+                body = e.read().decode("utf-8", "replace")[:600]   # HTTPError body
             except Exception:
-                err_body = ""
-            print(f"[ai_complete gemini] HTTP {e.code} model={GEMINI_MODEL} "
-                  f"keylen={len(key)} prefix={key[:4]} :: {err_body[:600]}")
-            return None
-        except Exception as e:
-            print(f"[ai_complete gemini] {type(e).__name__}: {e}")
-            return None
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=key)
-            msg = client.messages.create(
-                model=AI_MODEL, max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}])
-            return "".join(getattr(b, "text", "") for b in msg.content)
-        except Exception as e:
-            print(f"[ai_complete anthropic] {e}")
+                pass
+            print(f"[ai_complete {kind}] {type(e).__name__}: {e} {body}")
             return None
     return None
 
 
-AI_PROMPT = """You are a Singapore financial-statements reviewer reviewing the \
-unaudited financial statements of a Singapore-incorporated company. The arithmetic \
-has ALREADY been independently verified by a separate program, so do NOT re-check \
-sums — focus on disclosure judgement and language.
+AI_PROMPT = """You are a senior technical reviewer of Singapore-incorporated \
+companies' financial statements (SFRS / SFRS for Small Entities), the way a manager \
+in an accounting firm reviews a junior's draft before it goes to the client. Be \
+specific, cite the actual figures/notes from THIS set, and give practical, quotable \
+recommendations. Do not pad with generic textbook statements; every observation must \
+be anchored to something in this document.
 
-Review the extracted financial statements below and report:
+A separate program has ALREADY checked the arithmetic; its findings are given to you \
+below under "AUTOMATED CHECKS". Use them: comment on the accounting/disclosure \
+IMPLICATIONS of any flagged item (e.g. a balance sheet that does not balance, cross-add \
+errors in the statement of changes in equity, a going-concern risk), but do not merely \
+re-list the numbers. You may still raise arithmetic points the program missed.
 
-1. FRS compliance against Singapore FRS 1. For GOING CONCERN: first read the \
-statement of financial position and decide whether the company is solvent (positive \
-net assets AND net current assets, profitable) or NOT (net liabilities / negative \
-equity, net current liabilities, or recurring losses). If it is solvent, a standard \
-going-concern basis is fine — do NOT invent a material-uncertainty issue. If it is \
-NOT solvent yet the accounts are on a going-concern basis, the note MUST specify the \
-financial support being relied on (who provides it — shareholders, directors or the \
-holding company — and whether there is an undertaking/letter of support not to recall \
-amounts due), acknowledge the material uncertainty, state a 12-month assessment period, \
-and give the directors' conclusion. Flag if any of these are missing, and flag any \
-CONTRADICTION between the going-concern narrative and the actual figures (e.g. claims \
-of solvency despite net liabilities). Also check significant judgements & estimates and \
-that standards issued-but-not-yet-effective have dates correct for the financial year), \
-FRS 2 (inventory cost formula, only if inventory exists), FRS 12 (deferred tax / \
-unutilised tax losses recognised or disclosed with amounts), FRS 109 (financial \
-instruments note includes ONLY financial instruments — not prepayments, inventory \
-or tax), FRS 115 (revenue recognition basis — over time vs point in time — clearly \
-stated and consistent), FRS 116 (leases recognised if the company leases premises).
+Review against the Singapore standards and report concrete issues:
 
-2. Grammar/typography: spelling, British vs American English (SG uses British), \
-singular/plural (Director vs Directors), defined-term capitalisation ("the Company"), \
-leftover placeholders (square brackets, blanks), and abbreviations.
+FRS 1 / presentation: going concern — read the statement of financial position: is the \
+company solvent (positive net assets AND net current assets, profitable) or not (net \
+liabilities, net current liabilities, or recurring losses)? If solvent, a plain \
+going-concern basis is fine — do NOT invent a material uncertainty. If NOT solvent but \
+prepared on a going-concern basis, the note MUST name the financial support relied on \
+(shareholder / director / holding-company undertaking or letter of support not to \
+recall amounts), acknowledge material uncertainty, state a 12-month assessment, and give \
+the directors' conclusion — flag whichever are missing, and flag any contradiction \
+between the narrative and the figures. Also: comparatives present and consistent; \
+significant judgements & estimates note meaningful (not boilerplate); rounding/units \
+stated; negative numbers in brackets consistently.
 
-Return STRICT JSON only, no prose around it, in exactly this shape:
-{"frs_observations":[{"frs":"FRS 12","issue":"...","detail":"...","recommendation":"..."}],
- "grammar_issues":[{"location":"...","current":"...","suggested":"..."}],
- "narrative":"2-4 sentence overall summary"}
+FRS 110/consolidation, FRS 7 statement of cash flows classification, FRS 2 (inventory \
+cost formula only if inventory exists), FRS 12 (current + deferred tax; unutilised tax \
+losses recognised or the reason not; effective-tax-rate reconciliation), FRS 16/116 \
+(PPE depreciation policy & useful lives; right-of-use assets and lease liabilities if \
+the company leases premises/equipment), FRS 109 (the financial-instruments / financial \
+risk note must cover ONLY financial instruments — not prepayments, inventory or tax — \
+and address credit, liquidity and market risk), FRS 115 (revenue recognition basis — \
+over time vs point in time — stated and consistent with the business), FRS 24 \
+(related-party transactions and key management remuneration disclosed), FRS 37 \
+(provisions/contingencies), and directors'/intercompany balances terms.
 
-If something is fine, omit it rather than inventing issues. Financial statements text:
+SHARE CAPITAL — be precise: state the issued and paid-up share capital shown in the \
+accounts as a dollar figure, check it is consistent across the statement of financial \
+position, the statement of changes in equity and the share-capital note, and that it \
+equals number of shares multiplied by issue price. If an ACRA figure appears in the \
+automated checks above, say whether the two agree and by exactly how much, and give the \
+most likely cause of any difference (e.g. the accounts showing the number of shares \
+rather than the dollar amount, a share allotment after the year-end, or a transposition). \
+Quote both figures.
 
-"""
+Grammar & drafting: British spelling (SG uses British), singular/plural (Director vs \
+Directors), defined-term capitalisation ("the Company"), leftover placeholders (square \
+brackets, blanks, "XXX", TBD), wrong company name or financial-year dates, and \
+inconsistent number formatting.
+
+Return STRICT JSON only (no prose, no markdown) in exactly this shape:
+{"narrative":"3-6 sentence overall assessment a reviewer would write, naming the most \
+important issues and the company's apparent financial position",
+ "frs_observations":[{"area":"Going concern","frs":"FRS 1","severity":"high|medium|low",
+   "issue":"short title","detail":"what is wrong/missing in THIS set, citing the figure or note",
+   "recommendation":"what the preparer should do"}],
+ "grammar_issues":[{"location":"where","current":"...","suggested":"..."}]}
+
+Order frs_observations by severity (high first). Aim for the real issues — a competent \
+reviewer of a flawed draft typically finds several. Only omit a category if it is \
+genuinely fine."""
 
 
 def extract_full_text(doc):
@@ -1725,22 +1799,61 @@ def _parse_json(raw):
     return {}
 
 
-def ai_review(extracted_text):
-    """Judgement-based review via the configured LLM (Gemini free tier or Claude)."""
+def _findings_context(findings):
+    """Summarise the deterministic checks as plain text to ground the AI review."""
+    if not findings:
+        return "(none provided)"
+    L = []
+    bc = findings.get("balance_checks") or []
+    for b in bc:
+        L.append(f"- Balance sheet: total assets {b['total_assets']:,.2f} vs equity+liabilities "
+                 f"{b['equity_plus_liabilities']:,.2f} (diff {b['difference']:,.2f}) — "
+                 f"{'balances' if b.get('balanced') else 'DOES NOT BALANCE'}.")
+    for c in (findings.get("tally_checks") or [])[:12]:
+        L.append(f"- Subtotal '{c['label']}' (table {c['table']}): lines sum to "
+                 f"{c['sum_of_parts']:,.2f} but stated {c['stated_total']:,.2f} (diff {c['difference']:,.2f}).")
+    for c in (findings.get("pl_checks") or [])[:8]:
+        L.append(f"- P&L check '{c['check']}' (table {c['table']}): expected {c['expected']:,.2f}, "
+                 f"stated {c['stated']:,.2f} (diff {c['difference']:,.2f}).")
+    for c in (findings.get("row_checks") or [])[:12]:
+        L.append(f"- Cross-add '{c['row']}' (table {c['table']}): across = {c['sum_across']:,.2f} "
+                 f"vs stated total {c['stated_total']:,.2f} (diff {c['difference']:,.2f}).")
+    for c in (findings.get("cross_checks") or []):
+        L.append(f"- Cross-statement: {c['check']} — {c['left']:,.2f} vs {c['right']:,.2f} "
+                 f"(diff {c['difference']:,.2f}).")
+    gc = findings.get("going_concern") or {}
+    if gc.get("verdict"):
+        L.append(f"- Going concern: {gc['verdict']}")
+    missing = [k["item"] for k in (findings.get("frs_checks") or []) if not k.get("present")]
+    if missing:
+        L.append("- FRS keyword scan did not find: " + "; ".join(missing) + ".")
+    return "\n".join(L) if L else "No arithmetic/disclosure problems were flagged automatically."
+
+
+def ai_review(extracted_text, findings=None):
+    """Judgement-based review via the configured LLM, grounded in the automated checks."""
     if not AI_ENABLED:
         return {"enabled": False,
-                "error": "AI review not enabled — set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY.",
+                "error": "AI review not enabled — set GEMINI_API_KEY or ANTHROPIC_API_KEY.",
                 "frs_observations": [], "grammar_issues": [], "narrative": ""}
-    raw = ai_complete(AI_PROMPT + extracted_text[:60000])
+    prompt = (AI_PROMPT
+              + "\n\nAUTOMATED CHECKS (already run — comment on their implications):\n"
+              + _findings_context(findings)
+              + "\n\nFINANCIAL STATEMENTS (extracted text follows):\n\n"
+              + extracted_text[:70000])
+    raw = ai_complete(prompt, max_tokens=8000, json_out=True)
     if not raw:
         return {"enabled": False,
                 "error": "AI review could not run — check the API key (and any rate limits/credit).",
                 "frs_observations": [], "grammar_issues": [], "narrative": ""}
     data = _parse_json(raw)
+    obs = data.get("frs_observations", []) or []
+    order = {"high": 0, "medium": 1, "low": 2}
+    obs.sort(key=lambda o: order.get(str(o.get("severity", "")).lower(), 3))
     return {
         "enabled": True, "error": None,
-        "frs_observations": data.get("frs_observations", []),
-        "grammar_issues": data.get("grammar_issues", []),
+        "frs_observations": obs,
+        "grammar_issues": data.get("grammar_issues", []) or [],
         "narrative": data.get("narrative", ""),
     }
 
@@ -1765,12 +1878,17 @@ def _norm(s):
 
 
 def extract_share_capital(doc):
-    """The FS share-capital figure (from the balance sheet / share capital line)."""
+    """The FS issued/paid-up share-capital dollar figure (SOFP or share-capital note).
+    Matches the common label variants so the ACRA comparison is on the right line."""
+    variants = ("issued and paid-up", "issued and paid up", "issued and fully paid",
+                "called up share capital", "ordinary share capital")
     for table in doc.tables:
         labels, numgrid = _grid(table)
         skip = _note_columns(table)
         for r, label in enumerate(labels):
-            if label.lower().strip() == "share capital":
+            low = label.lower().strip()
+            if low.startswith("share capital") or low == "share capital" \
+                    or any(v in low for v in variants):
                 for c in range(1, len(numgrid[r])):
                     if c in skip:
                         continue
@@ -1867,6 +1985,41 @@ def crawl_bizfile(path):
     return out
 
 
+def check_cross_statements(doc):
+    """Ties between the primary statements. Conservative: only flags when both
+    sides are confidently located, to avoid false positives."""
+    out = []
+
+    def val(keys, exclude=()):
+        for table in doc.tables:
+            labels, numgrid = _grid(table)
+            skip = _note_columns(table)
+            ncols = max((len(r) for r in numgrid), default=0)
+            for c in range(1, ncols):
+                if c in skip:
+                    continue
+                v = _find_row(labels, numgrid, c, *keys, exclude=exclude)
+                if v is not None:
+                    return v
+        return None
+
+    # Statement of cash flows: opening + net movement should equal closing cash.
+    end_cash = val(("cash and cash equivalents at end", "cash and cash equivalents at the end",
+                    "cash and bank balances at end"))
+    beg_cash = val(("cash and cash equivalents at beginning",
+                    "cash and cash equivalents at the beginning",
+                    "cash and bank balances at beginning"))
+    net_cash = val(("net increase in cash", "net decrease in cash",
+                    "net (decrease)/increase in cash", "net increase/(decrease) in cash",
+                    "net change in cash"))
+    if end_cash is not None and beg_cash is not None and net_cash is not None:
+        if abs((beg_cash + net_cash) - end_cash) > 0.5:
+            out.append({"check": "Cash flow — opening cash + net movement should equal closing cash",
+                        "left": round(beg_cash + net_cash, 2), "right": round(end_cash, 2),
+                        "difference": round((beg_cash + net_cash) - end_cash, 2)})
+    return out
+
+
 def review_docx(path):
     """Return a dict of findings for a .docx file (rule-based, offline)."""
     findings = {
@@ -1874,7 +2027,7 @@ def review_docx(path):
         "sections_found": [], "sections_missing": [],
         "tables": 0, "paragraph_count": 0,
         "tally_checks": [], "balance_checks": [],
-        "pl_checks": [], "row_checks": [],
+        "pl_checks": [], "row_checks": [], "cross_checks": [],
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
                "grammar_issues": [], "narrative": ""},
@@ -1919,10 +2072,12 @@ def review_docx(path):
         findings["row_checks"].extend(check_row_totals(t_idx, table))
 
     findings["balance_checks"] = check_balance_equation(doc)
+    findings["cross_checks"] = check_cross_statements(doc)
     findings["language_issues"] = check_language(doc)
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
     findings["going_concern"] = assess_going_concern(doc, full_text_low)
-    findings["ai"] = ai_review(extract_full_text(doc))
+    # AI review runs last and is fed all the deterministic findings as grounding.
+    findings["ai"] = ai_review(extract_full_text(doc), findings)
 
     acra = acra_check(extract_full_text(doc))
     acra["fs_share_capital"] = extract_share_capital(doc)
@@ -1931,11 +2086,11 @@ def review_docx(path):
     findings["acra"] = acra
 
     findings["warnings"].append(
-        "This is an automated, rule-based first pass (arithmetic, balance equation, "
-        "British-English spelling and an FRS disclosure checklist). It does NOT yet "
-        "include the AI-assisted FRS judgement and full grammar review — those "
-        "need the paid upgrade described in the project plan. A qualified reviewer "
-        "should still perform the final FRS/IFRS review."
+        "This review combines automated checks (arithmetic, balance-sheet and "
+        "cross-statement ties, British-English spelling, an FRS disclosure checklist "
+        "and a solvency-based going-concern test) with an AI FRS-judgement and grammar "
+        "review. It is a first-pass aid — a qualified reviewer should still perform the "
+        "final FRS/IFRS sign-off."
     )
     return findings
 
@@ -2136,7 +2291,7 @@ def build_word_report(record):
             table(["Field", "Value"], rows)
 
         H("Numerical & arithmetic findings")
-        if f["tally_checks"] or f["pl_checks"] or f["row_checks"] or \
+        if f["tally_checks"] or f["pl_checks"] or f["row_checks"] or f.get("cross_checks") or \
            any(not b["balanced"] for b in f["balance_checks"]):
             rows, sh = [], []
             for c in f["tally_checks"]:
@@ -2154,18 +2309,24 @@ def build_word_report(record):
                     rows.append(["Balance sheet", "Assets vs Equity+Liabilities",
                                  f"{b['total_assets']:,.2f}", f"{b['equity_plus_liabilities']:,.2f}",
                                  "balance"]); sh.append(RED)
+            for c in f.get("cross_checks", []):
+                rows.append(["Cross-statement", c["check"],
+                             f"{c['left']:,.2f}", f"{c['right']:,.2f}", "tie"]); sh.append(RED)
             table(["Source", "Item", "Calculated", "Reported", "Type"], rows, sh)
         else:
-            body("All arithmetic checks passed (totals, balance equation, P&L flow, cross-adds).")
+            body("All arithmetic checks passed (totals, balance equation, P&L flow, "
+                 "cross-adds and cross-statement ties).")
 
         ai = f.get("ai", {})
         if ai.get("enabled"):
             if ai.get("narrative"):
-                H("AI summary"); body(ai["narrative"])
+                H("Reviewer's assessment"); body(ai["narrative"])
             if ai.get("frs_observations"):
                 H("FRS compliance observations")
-                table(["FRS", "Issue", "Detail", "Recommendation"],
-                      [[o.get("frs", ""), o.get("issue", ""), o.get("detail", ""),
+                table(["Severity", "Area / FRS", "Issue & detail", "Recommendation"],
+                      [[(o.get("severity", "") or "").title(),
+                        ((o.get("area", "") or "") + (" (" + o.get("frs", "") + ")" if o.get("frs") else "")).strip(),
+                        (o.get("issue", "") or "") + ((" — " + o.get("detail", "")) if o.get("detail") else ""),
                         o.get("recommendation", "")] for o in ai["frs_observations"]])
             if ai.get("grammar_issues"):
                 H("Grammar & wording")
