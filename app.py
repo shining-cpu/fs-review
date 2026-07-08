@@ -180,7 +180,7 @@ DASHBOARD_HTML = """{% extends "base.html" %}
 <div class="card">
   <h1>Upload financial statements</h1>
   <p class="muted">Allowed file types: .docx, .pdf, .xlsx, .xls — max 25 MB. A review report is generated on upload.</p>
-  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="uploadForm">
     <div class="dropzone" id="dz">
       <p class="muted" style="margin:0 0 10px">Drag &amp; drop your financial statements here, or choose a file:</p>
       <input type="file" id="fileInput" name="file" accept=".docx,.pdf,.xlsx,.xls" required
@@ -206,6 +206,17 @@ DASHBOARD_HTML = """{% extends "base.html" %}
       }
       wire('dz', 'fileInput');
       wire('dzb', 'bizInput');
+      // Prevent double-submit (which created duplicate reviews) and show progress.
+      var uf = document.getElementById('uploadForm'),
+          ub = document.getElementById('uploadBtn'),
+          fin = document.getElementById('fileInput');
+      if(uf && ub){
+        uf.addEventListener('submit', function(){
+          if(fin && (!fin.files || !fin.files.length)) return;   // let 'required' handle it
+          ub.disabled = true;
+          ub.textContent = 'Reviewing… this can take up to a minute — please wait';
+        });
+      }
     });
     </script>
     <div style="margin:0 0 16px">
@@ -215,7 +226,7 @@ DASHBOARD_HTML = """{% extends "base.html" %}
         <input type="file" id="bizInput" name="acra_bizfile" accept=".pdf" style="font-size:15px">
       </div>
     </div>
-    <button class="btn" type="submit">Upload &amp; review</button>
+    <button class="btn" type="submit" id="uploadBtn">Upload &amp; review</button>
   </form>
 </div>
 
@@ -1404,12 +1415,28 @@ def check_pl(t_idx, table):
                             "difference": round(exp - gp, 2)})
         if net is not None and pbt is not None:
             tx = tax or 0
-            exp = pbt + tx if (tax is None or tx < 0) else pbt - tx
-            if abs(exp - net) > 0.5:
+            exp_minus = pbt - tx          # tax treated as an expense (deduct)
+            exp_plus = pbt + tx           # tax treated as a credit (add back)
+            if abs(exp_minus - net) <= 0.5:
+                pass                      # ties correctly, nothing to flag
+            elif tx and abs(exp_plus - net) <= 0.5:
+                # Net = before tax + tax. Arithmetically self-consistent but the tax
+                # figure is shown as a positive "expense" while being added back —
+                # usually a prior-year over-provision credit shown without brackets.
+                # Flag softly as a presentation point, not a hard casting error.
+                out.append({"table": t_idx + 1,
+                            "check": ("Income tax of {:,.2f} is added back (reducing the "
+                                      "loss), not deducted — if it is a genuine expense the "
+                                      "loss should be {:,.2f}; if a prior-year over-provision "
+                                      "credit, show it in brackets".format(abs(tx), exp_minus)),
+                            "expected": round(exp_minus, 2), "stated": round(net, 2),
+                            "difference": round(exp_minus - net, 2),
+                            "kind": "tax sign / presentation"})
+            else:
                 out.append({"table": t_idx + 1,
                             "check": "Loss/profit for year = Before tax − Tax",
-                            "expected": round(exp, 2), "stated": round(net, 2),
-                            "difference": round(exp - net, 2)})
+                            "expected": round(exp_minus, 2), "stated": round(net, 2),
+                            "difference": round(exp_minus - net, 2)})
     return out
 
 
@@ -1513,19 +1540,21 @@ def check_going_concern(full_text_low):
 # Phrases that show the going-concern basis is supported by external financial
 # support — what FRS 1 expects when a company is insolvent / has net current
 # liabilities and still prepares accounts on a going-concern basis.
+# Kept deliberately SPECIFIC: these phrases evidence that a named party has
+# undertaken to support the company. Generic solvency phrases such as "as and
+# when they fall due" are NOT here — they are boilerplate in the directors'
+# statement and previously produced a false "financial support specified: Yes".
 FIN_SUPPORT_KWS = [
     "continued financial support", "continuing financial support",
     "continue to provide financial support", "provide financial support",
     "provide continuing financial support", "financial support from",
-    "financial support to", "shareholder support", "shareholders' support",
-    "shareholder's support", "will not recall", "will not demand repayment",
-    "not to recall", "undertaking to provide", "undertaken to provide",
-    "letter of support", "letter of financial support", "deed of",
+    "shareholder support", "shareholders' support", "shareholder's support",
+    "will not recall", "will not demand repayment", "not to recall",
+    "undertaking to provide", "undertaken to provide", "undertaking not to",
+    "letter of support", "letter of financial support",
     "support from its holding", "support from the holding",
     "support from its shareholder", "support from the shareholder",
     "support from its director", "support from the director",
-    "funds to enable the company to meet", "meet its liabilities as and when",
-    "meet its obligations as and when", "as and when they fall due",
 ]
 
 
@@ -1947,6 +1976,18 @@ def _findings_context(findings):
     for c in (findings.get("cross_checks") or []):
         L.append(f"- Cross-statement: {c['check']} — {c['left']:,.2f} vs {c['right']:,.2f} "
                  f"(diff {c['difference']:,.2f}).")
+    ca = findings.get("cash_anchor") or {}
+    if ca.get("closing") is not None:
+        if ca.get("opening") is not None:
+            L.append(f"- GROUND-TRUTH cash (from the balance sheet — use these EXACT figures, "
+                     f"do NOT recompute): closing cash = {ca['closing']:,.2f}, opening cash = "
+                     f"{ca['opening']:,.2f}, so the net movement in cash MUST be "
+                     f"{ca['net_change']:,.2f}. Any rebuilt statement of cash flows must close "
+                     f"at {ca['closing']:,.2f}.")
+        else:
+            L.append(f"- GROUND-TRUTH cash (from the balance sheet): closing cash = "
+                     f"{ca['closing']:,.2f}. Any rebuilt statement of cash flows must close at "
+                     f"this figure.")
     gc = findings.get("going_concern") or {}
     if gc.get("verdict"):
         L.append(f"- Going concern: {gc['verdict']}")
@@ -1978,14 +2019,41 @@ def ai_review(extracted_text, findings=None):
     obs = data.get("frs_observations", []) or []
     order = {"high": 0, "medium": 1, "low": 2}
     obs.sort(key=lambda o: order.get(str(o.get("severity", "")).lower(), 3))
+    narrative = data.get("narrative", "")
+    unverified = _unverified_ai_numbers(obs, extracted_text)
+    if unverified:
+        narrative = (narrative + "  ⚠ Please double-check these figures — the AI cited "
+                     "them but they were not found verbatim in the document (they may be "
+                     "sums the AI computed, which the free model can get wrong): "
+                     + ", ".join(unverified) + ".").strip()
     return {
         "enabled": True, "error": None,
         "frs_observations": obs,
         "corrected_figures": data.get("corrected_figures", []) or [],
         "suggested_wording": data.get("suggested_wording", []) or [],
         "grammar_issues": data.get("grammar_issues", []) or [],
-        "narrative": data.get("narrative", ""),
+        "narrative": narrative,
     }
+
+
+def _unverified_ai_numbers(observations, text):
+    """Conservative hallucination guard: return the DISTINCT large figures (>= 1,000)
+    that the AI quotes in its observation details but that do NOT appear (comma-
+    stripped) anywhere in the document text. Small numbers, years and percentages are
+    ignored to avoid false alarms."""
+    text_digits = re.sub(r"[,\s]", "", text)
+    years = {str(y) for y in range(1990, 2101)}
+    seen, misses = set(), []
+    for o in observations:
+        blob = " ".join(str(o.get(k, "")) for k in ("detail", "issue", "recommendation"))
+        for tok in re.findall(r"\d[\d,]{3,}", blob):        # 4+ digits (>= 1,000)
+            norm = tok.replace(",", "")
+            if norm in years or norm in seen:
+                continue
+            seen.add(norm)
+            if norm not in text_digits:
+                misses.append(tok)
+    return misses[:8]
 
 
 # --------------------------------------------------------------------------
@@ -2011,20 +2079,33 @@ def extract_share_capital(doc):
     """The FS issued/paid-up share-capital dollar figure (SOFP or share-capital note).
     Matches the common label variants so the ACRA comparison is on the right line."""
     variants = ("issued and paid-up", "issued and paid up", "issued and fully paid",
-                "called up share capital", "ordinary share capital")
+                "called up share capital", "ordinary share capital",
+                "at 1 january and 31 december", "at 31 december")
+    candidates = []
     for table in doc.tables:
         labels, numgrid = _grid(table)
         skip = _note_columns(table)
+        low_all = " ".join(labels).lower()
+        note_is_share_capital = "share capital" in low_all or "ordinary share" in low_all
         for r, label in enumerate(labels):
             low = label.lower().strip()
-            if low.startswith("share capital") or low == "share capital" \
-                    or any(v in low for v in variants):
-                for c in range(1, len(numgrid[r])):
-                    if c in skip:
-                        continue
-                    if numgrid[r][c] is not None:
-                        return numgrid[r][c]
-    return None
+            match = (low.startswith("share capital") or low == "share capital"
+                     or any(v in low for v in variants[:5])
+                     or (note_is_share_capital and any(v in low for v in variants[5:])))
+            if not match:
+                continue
+            for c in range(1, len(numgrid[r])):
+                if c in skip:
+                    continue
+                v = numgrid[r][c]
+                if v is not None:
+                    candidates.append(v)
+    if not candidates:
+        return None
+    # Prefer the largest-magnitude candidate: the dollar amount of share capital,
+    # not a stray note reference (e.g. "9") or a tiny mis-hit. A share-count column
+    # equal to the dollar amount is harmless (same value).
+    return max(candidates, key=lambda x: abs(x))
 
 
 def acra_check(full_text):
@@ -2147,7 +2228,46 @@ def check_cross_statements(doc):
             out.append({"check": "Cash flow — opening cash + net movement should equal closing cash",
                         "left": round(beg_cash + net_cash, 2), "right": round(end_cash, 2),
                         "difference": round((beg_cash + net_cash) - end_cash, 2)})
+    # The cash-flow statement's closing cash MUST equal the balance-sheet cash.
+    # Use the deterministic balance-sheet cash anchor (year columns only).
+    _ca = cash_anchor(doc)
+    bs_cash = _ca["closing"] if _ca else None
+    if end_cash is not None and bs_cash is not None and abs(end_cash - bs_cash) > 0.5:
+        out.append({"check": "Statement of cash flows closing cash does not tie to the "
+                             "balance-sheet cash",
+                    "left": round(end_cash, 2), "right": round(bs_cash, 2),
+                    "difference": round(end_cash - bs_cash, 2)})
     return out
+
+
+def cash_anchor(doc):
+    """Deterministic ground-truth cash figures from the balance sheet, so the AI
+    has the correct closing/opening cash and net movement to rebuild the cash-flow
+    statement instead of computing them itself (where the free model slips)."""
+    for table in doc.tables:
+        labels, numgrid = _grid(table)
+        low_all = " ".join(labels).lower()
+        if "total current liabilit" not in low_all and "total asset" not in low_all:
+            continue
+        skip = _note_columns(table)
+        ncols = max((len(r) for r in numgrid), default=0)
+        moneycols = [c for c in range(1, ncols) if c not in skip]
+        for r, label in enumerate(labels):
+            low = label.lower().strip()
+            if (low.startswith("cash and cash equivalents") or low == "cash"
+                    or low.startswith("cash and bank")):
+                vals = [numgrid[r][c] for c in moneycols
+                        if c < len(numgrid[r]) and numgrid[r][c] is not None]
+                # Year columns are the RIGHTMOST; a leftover note-reference column
+                # (e.g. "8") sits on the left, so use the last two figures — current
+                # year (closing) then prior year (opening).
+                if len(vals) >= 2:
+                    closing, opening = vals[-2], vals[-1]
+                    return {"closing": round(closing, 2), "opening": round(opening, 2),
+                            "net_change": round(closing - opening, 2)}
+                if len(vals) == 1:
+                    return {"closing": round(vals[-1], 2), "opening": None, "net_change": None}
+    return None
 
 
 def build_corrections(findings):
@@ -2166,10 +2286,16 @@ def build_corrections(findings):
                 f"(out by {abs(b['difference']):,.2f}).",
                 "Investigate the difference and correct it so total assets equal total equity plus liabilities.")
     for c in findings.get("pl_checks", []):
-        add("high",
-            f"Profit & loss (table {c['table']}): {c['check']} is {c['stated']:,.2f} "
-            f"but should be {c['expected']:,.2f} (out by {abs(c['difference']):,.2f}).",
-            "Correct the difference — usually the tax line or a mis-cast subtotal.")
+        if c.get("kind") == "tax sign / presentation":
+            add("medium",
+                f"Profit & loss (table {c['table']}): {c['check']}.",
+                "Confirm whether the tax figure is a prior-year over-provision credit "
+                "(show it in brackets) or a genuine expense (which would increase the loss).")
+        else:
+            add("high",
+                f"Profit & loss (table {c['table']}): {c['check']} is {c['stated']:,.2f} "
+                f"but should be {c['expected']:,.2f} (out by {abs(c['difference']):,.2f}).",
+                "Correct the difference — usually the tax line or a mis-cast subtotal.")
     for c in findings.get("tally_checks", []):
         add("high",
             f"'{c['label']}' (table {c['table']}): the line items add to {c['sum_of_parts']:,.2f} "
@@ -2241,7 +2367,7 @@ def review_docx(path):
         "sections_found": [], "sections_missing": [],
         "tables": 0, "paragraph_count": 0,
         "tally_checks": [], "balance_checks": [],
-        "pl_checks": [], "row_checks": [], "cross_checks": [],
+        "pl_checks": [], "row_checks": [], "cross_checks": [], "cash_anchor": None,
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
                "corrected_figures": [], "suggested_wording": [],
@@ -2288,6 +2414,7 @@ def review_docx(path):
 
     findings["balance_checks"] = check_balance_equation(doc)
     findings["cross_checks"] = check_cross_statements(doc)
+    findings["cash_anchor"] = cash_anchor(doc)
     findings["language_issues"] = check_language(doc)
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
     findings["going_concern"] = assess_going_concern(doc, full_text_low)
