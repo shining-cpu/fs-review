@@ -279,6 +279,23 @@ REPORT_HTML = """{% extends "base.html" %}
 </div>
 {% else %}
 
+{% set hi = f.corrections|selectattr('severity','equalto','high')|list|length %}
+{% set md = f.corrections|selectattr('severity','equalto','medium')|list|length %}
+{% set lo = f.corrections|length - hi - md %}
+<div class="card" style="border-left:6px solid {% if hi %}#dc2626{% elif md %}#d97706{% else %}#16a34a{% endif %}">
+  <h2 style="margin-top:0">At a glance</h2>
+  <p style="font-size:15px;margin:6px 0">
+    <span class="pill bad">{{ hi }} High</span>
+    <span class="pill warn">{{ md }} Medium</span>
+    <span class="pill">{{ lo }} Minor</span>
+    &nbsp; {% if f.balance_checks and f.balance_checks[0].balanced %}<span class="pill good">Balance sheet balances</span>{% endif %}
+    {% if f.going_concern and f.going_concern.at_risk %}<span class="pill bad">Going-concern risk</span>{% else %}<span class="pill good">No going-concern flag</span>{% endif %}
+    {% if f.ai and f.ai.enabled %}<span class="pill good">AI reviewed</span>{% else %}<span class="pill warn">AI off</span>{% endif %}
+  </p>
+  {% if f.ai and f.ai.narrative %}<p class="muted" style="margin:8px 0 0">{{ f.ai.narrative }}</p>{% endif %}
+  <p class="muted" style="margin:10px 0 0;font-size:12px">Work top-down: fix the High items first. Full detail is in the sections below.</p>
+</div>
+
 {% if f.corrections %}
 <div class="card" style="border-color:#fca5a5;background:#fff5f5">
   <h2>Corrections to make <span class="pill bad">{{ f.corrections|length }}</span></h2>
@@ -1519,7 +1536,8 @@ GC_ELEMENTS = [
      ["twelve months", "12 months", "next twelve months", "at least twelve months"]),
     ("Management's plans / mitigation",
      ["cost containment", "cost-containment", "shareholder support", "continued financial support",
-      "continuing financial support", "additional financing", "funding", "financial support"]),
+      "continuing financial support", "additional financing", "raise additional capital",
+      "secure additional funding", "obtained an undertaking", "letter of support"]),
     ("Conclusion that the basis is appropriate",
      ["consider this basis to be appropriate", "appropriate", "able to pay its debts",
       "continue as a going concern", "able to continue"]),
@@ -1841,7 +1859,12 @@ changes in estimates/policies and prior-period errors.
 reconciliation; the amount of unused tax losses / deductible temporary differences and \
 whether a deferred tax asset is recognised or why not; the tax rate used.
  - FRS 16 PP&E: measurement basis; depreciation method and useful lives per class; \
-reconciliation of carrying amount; note carrying amount tying to the balance sheet.
+reconciliation of carrying amount; the note's closing carrying amount MUST equal closing \
+cost minus closing accumulated depreciation AND must equal the balance-sheet figure. If the \
+note carrying amount differs from the balance sheet, the balance sheet (which balances) is \
+usually the correct figure and the NOTE is the error — recommend correcting the note, NOT \
+changing the balance sheet. Also check the depreciation charge in the note equals the \
+depreciation in the profit & loss.
  - FRS 116 leases: right-of-use assets and lease liabilities for leased premises/equipment; \
 maturity of lease liabilities; short-term / low-value exemptions — if the company clearly \
 occupies premises but shows no lease or rent, say so.
@@ -2345,16 +2368,31 @@ def build_corrections(findings):
             f"\"{g['found']}\" ({g.get('kind', 'wording')}).",
             f"Replace with \"{g['suggest']}\".")
     ai = findings.get("ai", {})
+    # Going concern is already captured as a precise deterministic correction above
+    # (it lists exactly which disclosure elements are missing), so skip the AI's
+    # going-concern item here to avoid a near-duplicate row in the punch-list — its
+    # full detail still appears in the FRS observations section.
+    gc_covered = bool(gc.get("at_risk"))
     for o in (ai.get("frs_observations") or []):
         rec = o.get("recommendation")
         issue = o.get("issue") or o.get("detail")
+        area = o.get("area") or o.get("frs") or "FRS"
+        if gc_covered and "going concern" in (area + " " + (issue or "")).lower():
+            continue
         if rec or issue:
-            area = o.get("area") or o.get("frs") or "FRS"
             sev = str(o.get("severity", "medium")).lower()
             err = f"{area}: {issue}" if issue else f"{area}: {rec}"
             add(sev if sev in ("high", "medium", "low") else "medium",
                 err, rec or "See the FRS observation above.")
 
+    # Final safety net: drop any exact-duplicate (severity, error) rows.
+    seen, uniq = set(), []
+    for c in C:
+        key = (c["severity"], c["error"].strip().lower())
+        if key not in seen:
+            seen.add(key)
+            uniq.append(c)
+    C = uniq
     order = {"high": 0, "medium": 1, "low": 2}
     C.sort(key=lambda x: order.get(x["severity"], 3))
     return C
