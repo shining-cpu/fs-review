@@ -1695,7 +1695,7 @@ def _gemini_complete(prompt, key, max_tokens, json_out):
     import urllib.request, urllib.error
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
            + GEMINI_MODEL + ":generateContent")
-    gen = {"maxOutputTokens": max_tokens, "temperature": 0.2}
+    gen = {"maxOutputTokens": max_tokens, "temperature": 0}
     if json_out:
         gen["responseMimeType"] = "application/json"   # forces clean JSON, no fences
     # Disable "thinking" on 2.5 models so the whole token budget goes to the answer
@@ -1846,16 +1846,28 @@ Directors), defined-term capitalisation ("the Company"), leftover placeholders (
 brackets, blanks, "XXX", TBD), wrong company name or financial-year dates, and \
 inconsistent number formatting.
 
-CORRECTED FIGURES — this is important. For every numerical error you or the automated \
-checks identify (a statement that does not balance or reconcile, a cross-add error, a note \
-that disagrees with the face of the statements, a mis-cast subtotal, a cash-flow statement \
-that does not tie to the balance-sheet cash), give the CORRECTED presentation, not just the \
-fault. Show the corrected line items and totals as plain text laid out line-by-line \
-(label then value), quoting the figures from THIS set, so the preparer can drop it straight \
-in. For a broken cash-flow statement, rebuild the affected section in full (loss before tax, \
-adjustments, each working-capital movement derived from the balance-sheet movements, the \
-subtotal, investing, financing, net change, opening and closing cash tying to the balance \
-sheet). Only include corrections you can actually derive from the figures given.
+CORRECTED FIGURES — give the corrected presentation for numerical errors, but follow this \
+ARITHMETIC DISCIPLINE strictly (you are a language model and must not rely on your own \
+mental arithmetic):
+ 1. Use ONLY numbers that already appear in the financial statements or in the AUTOMATED \
+CHECKS below. Do NOT invent or compute new totals in your head.
+ 2. To correct a figure, quote the two figures involved and state which one is right and \
+what the other should change to — do not produce a long chain of new calculations.
+ 3. For a working-capital movement, take it directly as (this-year balance − last-year \
+balance) using the two balance-sheet figures, and show that subtraction; a rise in a \
+liability is a cash INFLOW (positive), a fall is an OUTFLOW (negative); the reverse for \
+assets.
+ 4. HARD RULE for the statement of cash flows: the closing cash MUST equal the cash and \
+cash equivalents on the balance sheet for the same year, and opening cash MUST equal last \
+year's balance-sheet cash. State these two figures explicitly and make the statement tie to \
+them. If your rebuilt operating/investing/financing lines do not add up to (closing − \
+opening), DO NOT publish invented totals — instead list only the specific lines that are \
+wrong and what each should be, and note that the full statement must be recast to close at \
+the balance-sheet cash figure.
+ 5. Before finalising, re-read each corrected_figures block: if any total is one you \
+calculated yourself rather than one taken from the statements/automated checks, remove the \
+number and describe the correction in words instead. A correct qualitative correction beats \
+a wrong number.
 
 SUGGESTED WORDING — where a disclosure is missing, boilerplate, contradictory or wrong \
 (e.g. an inadequate going-concern note, a revenue-recognition policy that describes the \
