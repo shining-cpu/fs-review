@@ -268,6 +268,18 @@ REPORT_HTML = """{% extends "base.html" %}
 </div>
 {% else %}
 
+{% if f.corrections %}
+<div class="card" style="border-color:#fca5a5;background:#fff5f5">
+  <h2>Corrections to make <span class="pill bad">{{ f.corrections|length }}</span></h2>
+  <p class="muted">A punch-list to work through before finalising. Arithmetic and disclosure points come from the automated checks; judgement points come from the AI reviewer. Full detail is in the sections below.</p>
+  <ol style="margin-top:10px;padding-left:22px">
+    {% for c in f.corrections %}
+    <li style="margin-bottom:10px;line-height:1.5">{% if c.severity == 'high' %}<span class="pill bad">High</span> {% elif c.severity == 'medium' %}<span class="pill warn">Medium</span> {% else %}<span class="pill">Minor</span> {% endif %}{{ c.text }}</li>
+    {% endfor %}
+  </ol>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Document structure</h2>
   <p><strong>{{ f.tables }}</strong> table(s), <strong>{{ f.paragraph_count }}</strong> non-empty paragraph(s).</p>
@@ -2020,6 +2032,72 @@ def check_cross_statements(doc):
     return out
 
 
+def build_corrections(findings):
+    """Turn every finding into a concrete, actionable correction (a punch-list)."""
+    C = []
+
+    def add(sev, text):
+        C.append({"severity": sev, "text": text})
+
+    for b in findings.get("balance_checks", []):
+        if not b.get("balanced"):
+            add("high", f"Statement of financial position does not balance — total assets "
+                        f"{b['total_assets']:,.2f} vs equity + liabilities "
+                        f"{b['equity_plus_liabilities']:,.2f}. Investigate and correct the "
+                        f"{abs(b['difference']):,.2f} difference.")
+    for c in findings.get("pl_checks", []):
+        add("high", f"Profit & loss (table {c['table']}): {c['check']} should be "
+                    f"{c['expected']:,.2f}, but is {c['stated']:,.2f}. Correct the "
+                    f"{abs(c['difference']):,.2f} difference (usually the tax line or a cast).")
+    for c in findings.get("tally_checks", []):
+        add("high", f"'{c['label']}' (table {c['table']}): the line items add to "
+                    f"{c['sum_of_parts']:,.2f} but the stated total is {c['stated_total']:,.2f}. "
+                    f"Reconcile the {abs(c['difference']):,.2f} difference.")
+    for c in findings.get("row_checks", []):
+        add("high", f"'{c['row']}' (table {c['table']}): the row casts across to "
+                    f"{c['sum_across']:,.2f} but the total column shows {c['stated_total']:,.2f}. "
+                    f"Correct the {abs(c['difference']):,.2f} difference.")
+    for c in findings.get("cross_checks", []):
+        add("high", f"{c['check']} — {c['left']:,.2f} vs {c['right']:,.2f}. Correct the "
+                    f"{abs(c['difference']):,.2f} difference.")
+    gc = findings.get("going_concern", {})
+    if gc.get("at_risk"):
+        why = ("a net liabilities position" if gc.get("bs_insolvent")
+               else "net current liabilities" if gc.get("liquidity_concern")
+               else "losses / negative operating cash-flow indicators")
+        missing = [e["element"] for e in gc.get("elements", []) if not e.get("present")]
+        if missing:
+            add("high", f"Going concern: the company shows {why}, so strengthen the going-concern "
+                        f"note — add / confirm: {', '.join(missing)}.")
+        else:
+            add("medium", f"Going concern: the company shows {why}; confirm the note fully covers "
+                          f"financial support, material uncertainty, the 12-month assessment and the "
+                          f"directors' conclusion.")
+    for c in gc.get("contradictions", []):
+        add("high", "Going concern: " + c)
+    ac = findings.get("acra", {})
+    fs_sc, reg = ac.get("fs_share_capital"), ac.get("registered_share_capital")
+    if fs_sc is not None and reg is not None and not ac.get("share_capital_matches"):
+        add("high", f"Share capital: the accounts show ${fs_sc:,.2f} but ACRA records "
+                    f"${reg:,.2f} issued & paid-up. Reconcile the ${abs(reg - fs_sc):,.2f} "
+                    f"difference (check number of shares vs dollar amount, or a post-year-end allotment).")
+    if ac.get("found") and ac.get("name_matches") is False:
+        add("medium", f"Company name differs from ACRA ('{ac.get('official_name')}') — correct it in the accounts.")
+    for g in findings.get("language_issues", []):
+        add("low", f"Replace \"{g['found']}\" with \"{g['suggest']}\" ({g.get('kind', 'wording')}).")
+    ai = findings.get("ai", {})
+    for o in (ai.get("frs_observations") or []):
+        rec = o.get("recommendation") or o.get("issue")
+        if rec:
+            area = o.get("area") or o.get("frs") or "FRS"
+            sev = str(o.get("severity", "medium")).lower()
+            add(sev if sev in ("high", "medium", "low") else "medium", f"{area}: {rec}")
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    C.sort(key=lambda x: order.get(x["severity"], 3))
+    return C
+
+
 def review_docx(path):
     """Return a dict of findings for a .docx file (rule-based, offline)."""
     findings = {
@@ -2084,6 +2162,8 @@ def review_docx(path):
     acra["registered_share_capital"] = None
     acra["share_capital_matches"] = None
     findings["acra"] = acra
+
+    findings["corrections"] = build_corrections(findings)
 
     findings["warnings"].append(
         "This review combines automated checks (arithmetic, balance-sheet and "
@@ -2170,6 +2250,8 @@ def upload():
         fs_sc = findings["acra"].get("fs_share_capital")
         if reg is not None and fs_sc is not None:
             findings["acra"]["share_capital_matches"] = abs(reg - fs_sc) <= 0.5
+        # Rebuild the correction punch-list now the ACRA share-capital comparison is in.
+        findings["corrections"] = build_corrections(findings)
 
     with open(stored_path, "rb") as _fb:
         file_bytes = _fb.read()
@@ -2289,6 +2371,13 @@ def build_word_report(record):
                 rows.append(["Share capital (per ACRA)", f"{rsc:,.2f}" + (
                     "  (matches)" if ac.get("share_capital_matches") else "  (mismatch)")])
             table(["Field", "Value"], rows)
+
+        if f.get("corrections"):
+            H("Corrections to make")
+            body("Action points to work through before finalising:")
+            tags = {"high": "[High] ", "medium": "[Medium] ", "low": "[Minor] "}
+            for i, c in enumerate(f["corrections"], 1):
+                body(f"{i}. {tags.get(c.get('severity', ''), '')}{c['text']}")
 
         H("Numerical & arithmetic findings")
         if f["tally_checks"] or f["pl_checks"] or f["row_checks"] or f.get("cross_checks") or \
