@@ -1679,10 +1679,13 @@ AI_MODEL = os.environ.get("FS_REVIEW_MODEL", "claude-haiku-4-5-20251001")
 # Free option: Google Gemini. If GEMINI_API_KEY is set it is used (free tier);
 # otherwise ANTHROPIC_API_KEY is used; otherwise the AI review is off.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-# Default to the strong reasoning model. gemini-2.5-flash was too weak/empty for
-# real FRS judgement. Override with GEMINI_MODEL if needed (e.g. back to flash to
-# save quota). If ANTHROPIC_API_KEY is set and PREFER_CLAUDE=1, Claude is used.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+# gemini-2.5-pro is NOT available on Google's free API tier (quota limit 0 -> 429),
+# so default to gemini-2.5-flash, which IS free. Flash used to return empty output
+# because "thinking" consumed the token budget; we now disable thinking (see
+# _gemini_complete) so it returns full output. Override with GEMINI_MODEL if you
+# have a paid key (e.g. gemini-2.5-pro). If ANTHROPIC_API_KEY is set and
+# PREFER_CLAUDE=1, Claude is used instead.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 PREFER_CLAUDE = os.environ.get("PREFER_CLAUDE", "0") == "1"
 AI_ENABLED = bool(GEMINI_API_KEY or ANTHROPIC_API_KEY)
@@ -1695,6 +1698,10 @@ def _gemini_complete(prompt, key, max_tokens, json_out):
     gen = {"maxOutputTokens": max_tokens, "temperature": 0.2}
     if json_out:
         gen["responseMimeType"] = "application/json"   # forces clean JSON, no fences
+    # Disable "thinking" on 2.5 models so the whole token budget goes to the answer
+    # (thinking previously ate the budget and returned empty output on flash).
+    if "2.5" in GEMINI_MODEL:
+        gen["thinkingConfig"] = {"thinkingBudget": 0}
     body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
                        "generationConfig": gen}).encode("utf-8")
     req = urllib.request.Request(url, data=body,
