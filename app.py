@@ -1762,28 +1762,68 @@ re-list the numbers. You may still raise arithmetic points the program missed.
 
 Review against the Singapore standards and report concrete issues:
 
-FRS 1 / presentation: going concern — read the statement of financial position: is the \
-company solvent (positive net assets AND net current assets, profitable) or not (net \
-liabilities, net current liabilities, or recurring losses)? If solvent, a plain \
-going-concern basis is fine — do NOT invent a material uncertainty. If NOT solvent but \
-prepared on a going-concern basis, the note MUST name the financial support relied on \
-(shareholder / director / holding-company undertaking or letter of support not to \
-recall amounts), acknowledge material uncertainty, state a 12-month assessment, and give \
-the directors' conclusion — flag whichever are missing, and flag any contradiction \
-between the narrative and the figures. Also: comparatives present and consistent; \
-significant judgements & estimates note meaningful (not boilerplate); rounding/units \
-stated; negative numbers in brackets consistently.
+FRS 1 / GOING CONCERN — treat this as a priority. Read the statement of financial \
+position: is the company solvent (positive net assets AND net current assets, profitable) \
+or not (net liabilities, net current liabilities, recurring losses, or negative operating \
+cash flow)? If clearly solvent, a plain going-concern basis is fine — do NOT invent a \
+material uncertainty. If there is ANY adverse indicator (net liabilities, net current \
+liabilities, recurring losses, negative operating cash flow, or reliance on related-party \
+funding), raise a HIGH-severity going-concern observation AND recommend a full disclosure \
+covering EACH element below, tailored with this company's actual figures:
+ (a) the adverse indicators, quoting the net-liability / net-current-liability / \
+accumulated-loss figures;
+ (b) whether a material uncertainty exists that may cast significant doubt on the ability \
+to continue as a going concern, stated explicitly if so;
+ (c) the specific financial support relied on — name the party (shareholder / director / \
+holding company), quote the balance being supported (e.g. the amount due to that party), \
+and state that a written undertaking / letter of support not to recall it for at least 12 \
+months from the date of approval has been obtained;
+ (d) management's assessment covering at least 12 months from the approval date, including \
+cash-flow projections and funding availability;
+ (e) the directors' conclusion that the going-concern basis remains appropriate;
+ (f) the consequences if the company could not continue (assets written down to recoverable \
+amount, non-current items reclassified as current, further liabilities provided for).
+Flag whichever elements are missing, flag any contradiction between the narrative and the \
+figures (e.g. a "can pay debts as they fall due" statement sitting oddly with net current \
+liabilities), and ALWAYS include a ready-to-paste replacement going-concern note in \
+suggested_wording whenever any indicator is present. Also check comparatives present and \
+consistent; significant judgements & estimates note meaningful (not boilerplate); \
+rounding/units stated; negatives in brackets consistently.
 
-FRS 110/consolidation, FRS 7 statement of cash flows classification, FRS 2 (inventory \
-cost formula only if inventory exists), FRS 12 (current + deferred tax; unutilised tax \
-losses recognised or the reason not; effective-tax-rate reconciliation), FRS 16/116 \
-(PPE depreciation policy & useful lives; right-of-use assets and lease liabilities if \
-the company leases premises/equipment), FRS 109 (the financial-instruments / financial \
-risk note must cover ONLY financial instruments — not prepayments, inventory or tax — \
-and address credit, liquidity and market risk), FRS 115 (revenue recognition basis — \
-over time vs point in time — stated and consistent with the business), FRS 24 \
-(related-party transactions and key management remuneration disclosed), FRS 37 \
-(provisions/contingencies), and directors'/intercompany balances terms.
+OTHER STANDARDS — be thorough and comprehensive; a competent reviewer of a small-company \
+draft typically raises disclosure points across SEVERAL of these. For each applicable \
+standard, check the specific disclosures below, and where any is missing or weak raise a \
+separate observation with a concrete recommended disclosure:
+ - FRS 1 presentation: statement of compliance with SFRS; basis of measurement; functional \
+& presentation currency; material accounting-policy information; significant judgements and \
+key estimation uncertainty (specific, not boilerplate); current/non-current split.
+ - FRS 7 cash flows: correct operating / investing / financing classification; reconciliation \
+of opening to closing cash that ties to the balance-sheet cash; non-cash transactions.
+ - FRS 8: standards issued but not yet effective, with effective dates and expected impact; \
+changes in estimates/policies and prior-period errors.
+ - FRS 12 income taxes: current + deferred tax; a numerical effective-tax-rate \
+reconciliation; the amount of unused tax losses / deductible temporary differences and \
+whether a deferred tax asset is recognised or why not; the tax rate used.
+ - FRS 16 PP&E: measurement basis; depreciation method and useful lives per class; \
+reconciliation of carrying amount; note carrying amount tying to the balance sheet.
+ - FRS 116 leases: right-of-use assets and lease liabilities for leased premises/equipment; \
+maturity of lease liabilities; short-term / low-value exemptions — if the company clearly \
+occupies premises but shows no lease or rent, say so.
+ - FRS 115 revenue: over time vs point in time, stated and matching the ACTUAL business \
+(flag any policy copied from a different industry); disaggregation of revenue; contract \
+liabilities / deferred revenue where fees are prepaid.
+ - FRS 109 financial instruments: the financial-instruments note must include ONLY financial \
+instruments (exclude prepayments, statutory balances such as SDL/GST, suspense accounts, \
+inventory and tax); categories; credit, liquidity (with a maturity analysis) and market \
+risk; ECL / impairment approach for receivables.
+ - FRS 24 related parties: name the relationships, disclose related-party transactions and \
+outstanding balances with their terms, and disclose key management personnel compensation — \
+flag if only a related-party definition/policy is given with no actual transactions / KMP note.
+ - FRS 37 provisions, contingent liabilities and commitments; FRS 10 events after the \
+reporting period; FRS 33 EPS if applicable; capital management; dividends.
+ Also check directors'-statement consistency (directors' interests vs the share register), \
+the company name and financial-year dates, and that every note cross-reference points to \
+the correct note.
 
 SHARE CAPITAL — be precise: state the issued and paid-up share capital shown in the \
 accounts as a dollar figure, check it is consistent across the statement of financial \
@@ -1830,9 +1870,13 @@ line-by-line with \\n between lines, label then value","note":"why it now ties (
 paragraph, ready to paste"}],
  "grammar_issues":[{"location":"where","current":"...","suggested":"..."}]}
 
-Order frs_observations by severity (high first). Aim for the real issues — a competent \
-reviewer of a flawed draft typically finds several, plus at least one corrected figure and \
-one suggested wording where the draft is flawed. Only omit a category if it is genuinely fine."""
+Order frs_observations by severity (high first). Be comprehensive on FRS disclosures — work \
+through every applicable standard above and raise a separate observation for each disclosure \
+that is missing or weak (a real small-company draft usually has several across FRS 1, 7, 8, \
+12, 16, 109, 115, 24 and 37). Whenever any going-concern indicator is present, include a \
+detailed going-concern observation AND a ready-to-paste going-concern note in \
+suggested_wording. Add corrected figures for every numerical error. Only omit a category if \
+it is genuinely fine."""
 
 
 def extract_full_text(doc):
@@ -1905,7 +1949,7 @@ def ai_review(extracted_text, findings=None):
               + _findings_context(findings)
               + "\n\nFINANCIAL STATEMENTS (extracted text follows):\n\n"
               + extracted_text[:70000])
-    raw = ai_complete(prompt, max_tokens=8000, json_out=True)
+    raw = ai_complete(prompt, max_tokens=12000, json_out=True)
     if not raw:
         return {"enabled": False,
                 "error": "AI review could not run — check the API key (and any rate limits/credit).",
