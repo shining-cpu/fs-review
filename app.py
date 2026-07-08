@@ -271,12 +271,20 @@ REPORT_HTML = """{% extends "base.html" %}
 {% if f.corrections %}
 <div class="card" style="border-color:#fca5a5;background:#fff5f5">
   <h2>Corrections to make <span class="pill bad">{{ f.corrections|length }}</span></h2>
-  <p class="muted">A punch-list to work through before finalising. Arithmetic and disclosure points come from the automated checks; judgement points come from the AI reviewer. Full detail is in the sections below.</p>
-  <ol style="margin-top:10px;padding-left:22px">
+  <p class="muted">A punch-list to work through before finalising. Each row shows the error found and the recommended correction. Arithmetic and disclosure points come from the automated checks; judgement points come from the AI reviewer.</p>
+  <table style="margin-top:10px">
+    <thead><tr><th style="width:70px">Severity</th><th style="width:44px">#</th><th>Error found</th><th>Recommended correction</th></tr></thead>
+    <tbody>
     {% for c in f.corrections %}
-    <li style="margin-bottom:10px;line-height:1.5">{% if c.severity == 'high' %}<span class="pill bad">High</span> {% elif c.severity == 'medium' %}<span class="pill warn">Medium</span> {% else %}<span class="pill">Minor</span> {% endif %}{{ c.text }}</li>
+    <tr>
+      <td>{% if c.severity == 'high' %}<span class="pill bad">High</span>{% elif c.severity == 'medium' %}<span class="pill warn">Medium</span>{% else %}<span class="pill">Minor</span>{% endif %}</td>
+      <td>{{ loop.index }}</td>
+      <td>{{ c.error }}</td>
+      <td>{{ c.recommendation }}</td>
+    </tr>
     {% endfor %}
-  </ol>
+    </tbody>
+  </table>
 </div>
 {% endif %}
 
@@ -537,6 +545,26 @@ REPORT_HTML = """{% extends "base.html" %}
       </tbody>
     </table>
     {% else %}<p class="muted">The AI reviewer did not raise FRS observations on this set.</p>{% endif %}
+    {% if f.ai.corrected_figures %}
+    <p style="margin-top:14px"><strong>Corrected figures</strong> <span class="muted">— ready to drop in</span></p>
+    {% for c in f.ai.corrected_figures %}
+    <div style="border:1px solid #d7deea;border-radius:8px;padding:12px 14px;margin:8px 0;background:#f7f9fc">
+      <div style="font-weight:600;color:#1F3864">{{ c.statement }}</div>
+      {% if c.issue %}<div class="muted" style="margin:2px 0 8px">{{ c.issue }}</div>{% endif %}
+      <pre style="white-space:pre-wrap;font-family:Consolas,monospace;font-size:13px;margin:0;background:#fff;border:1px solid #e5e9f0;border-radius:6px;padding:10px">{{ c.corrected }}</pre>
+      {% if c.note %}<div class="muted" style="margin-top:6px">{{ c.note }}</div>{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+    {% if f.ai.suggested_wording %}
+    <p style="margin-top:14px"><strong>Suggested replacement wording</strong> <span class="muted">— paste-ready</span></p>
+    {% for s in f.ai.suggested_wording %}
+    <div style="border-left:4px solid #2E5496;background:#eaf1fb;border-radius:0 8px 8px 0;padding:10px 14px;margin:8px 0">
+      <div style="font-weight:600;color:#1F3864;margin-bottom:4px">{{ s.note }}</div>
+      <div style="color:#203864;white-space:pre-wrap">{{ s.draft }}</div>
+    </div>
+    {% endfor %}
+    {% endif %}
     <p style="margin-top:14px"><strong>Grammar &amp; drafting</strong></p>
     {% if f.ai.grammar_issues %}
     <table>
@@ -1771,17 +1799,40 @@ Directors), defined-term capitalisation ("the Company"), leftover placeholders (
 brackets, blanks, "XXX", TBD), wrong company name or financial-year dates, and \
 inconsistent number formatting.
 
+CORRECTED FIGURES — this is important. For every numerical error you or the automated \
+checks identify (a statement that does not balance or reconcile, a cross-add error, a note \
+that disagrees with the face of the statements, a mis-cast subtotal, a cash-flow statement \
+that does not tie to the balance-sheet cash), give the CORRECTED presentation, not just the \
+fault. Show the corrected line items and totals as plain text laid out line-by-line \
+(label then value), quoting the figures from THIS set, so the preparer can drop it straight \
+in. For a broken cash-flow statement, rebuild the affected section in full (loss before tax, \
+adjustments, each working-capital movement derived from the balance-sheet movements, the \
+subtotal, investing, financing, net change, opening and closing cash tying to the balance \
+sheet). Only include corrections you can actually derive from the figures given.
+
+SUGGESTED WORDING — where a disclosure is missing, boilerplate, contradictory or wrong \
+(e.g. an inadequate going-concern note, a revenue-recognition policy that describes the \
+wrong business, a directors'-interest statement that contradicts the share register, a \
+missing related-party note), draft the actual replacement paragraph the preparer can paste \
+in, tailored to THIS company's figures and activities. Use square brackets only where a \
+fact must be confirmed from the records.
+
 Return STRICT JSON only (no prose, no markdown) in exactly this shape:
 {"narrative":"3-6 sentence overall assessment a reviewer would write, naming the most \
 important issues and the company's apparent financial position",
  "frs_observations":[{"area":"Going concern","frs":"FRS 1","severity":"high|medium|low",
    "issue":"short title","detail":"what is wrong/missing in THIS set, citing the figure or note",
    "recommendation":"what the preparer should do"}],
+ "corrected_figures":[{"statement":"e.g. Statement of cash flows (FY2025)",
+   "issue":"one line on what was wrong","corrected":"the corrected presentation, laid out \
+line-by-line with \\n between lines, label then value","note":"why it now ties (optional)"}],
+ "suggested_wording":[{"note":"e.g. Going concern (FRS 1)","draft":"the full replacement \
+paragraph, ready to paste"}],
  "grammar_issues":[{"location":"where","current":"...","suggested":"..."}]}
 
 Order frs_observations by severity (high first). Aim for the real issues — a competent \
-reviewer of a flawed draft typically finds several. Only omit a category if it is \
-genuinely fine."""
+reviewer of a flawed draft typically finds several, plus at least one corrected figure and \
+one suggested wording where the draft is flawed. Only omit a category if it is genuinely fine."""
 
 
 def extract_full_text(doc):
@@ -1847,7 +1898,8 @@ def ai_review(extracted_text, findings=None):
     if not AI_ENABLED:
         return {"enabled": False,
                 "error": "AI review not enabled — set GEMINI_API_KEY or ANTHROPIC_API_KEY.",
-                "frs_observations": [], "grammar_issues": [], "narrative": ""}
+                "frs_observations": [], "corrected_figures": [], "suggested_wording": [],
+                "grammar_issues": [], "narrative": ""}
     prompt = (AI_PROMPT
               + "\n\nAUTOMATED CHECKS (already run — comment on their implications):\n"
               + _findings_context(findings)
@@ -1857,7 +1909,8 @@ def ai_review(extracted_text, findings=None):
     if not raw:
         return {"enabled": False,
                 "error": "AI review could not run — check the API key (and any rate limits/credit).",
-                "frs_observations": [], "grammar_issues": [], "narrative": ""}
+                "frs_observations": [], "corrected_figures": [], "suggested_wording": [],
+                "grammar_issues": [], "narrative": ""}
     data = _parse_json(raw)
     obs = data.get("frs_observations", []) or []
     order = {"high": 0, "medium": 1, "low": 2}
@@ -1865,6 +1918,8 @@ def ai_review(extracted_text, findings=None):
     return {
         "enabled": True, "error": None,
         "frs_observations": obs,
+        "corrected_figures": data.get("corrected_figures", []) or [],
+        "suggested_wording": data.get("suggested_wording", []) or [],
         "grammar_issues": data.get("grammar_issues", []) or [],
         "narrative": data.get("narrative", ""),
     }
@@ -2033,33 +2088,39 @@ def check_cross_statements(doc):
 
 
 def build_corrections(findings):
-    """Turn every finding into a concrete, actionable correction (a punch-list)."""
+    """Turn every finding into a concrete correction, split into the ERROR (what is
+    wrong) and the RECOMMENDATION (what to do about it)."""
     C = []
 
-    def add(sev, text):
-        C.append({"severity": sev, "text": text})
+    def add(sev, error, rec):
+        C.append({"severity": sev, "error": error, "recommendation": rec})
 
     for b in findings.get("balance_checks", []):
         if not b.get("balanced"):
-            add("high", f"Statement of financial position does not balance — total assets "
-                        f"{b['total_assets']:,.2f} vs equity + liabilities "
-                        f"{b['equity_plus_liabilities']:,.2f}. Investigate and correct the "
-                        f"{abs(b['difference']):,.2f} difference.")
+            add("high",
+                f"Statement of financial position does not balance — total assets "
+                f"{b['total_assets']:,.2f} vs equity + liabilities {b['equity_plus_liabilities']:,.2f} "
+                f"(out by {abs(b['difference']):,.2f}).",
+                "Investigate the difference and correct it so total assets equal total equity plus liabilities.")
     for c in findings.get("pl_checks", []):
-        add("high", f"Profit & loss (table {c['table']}): {c['check']} should be "
-                    f"{c['expected']:,.2f}, but is {c['stated']:,.2f}. Correct the "
-                    f"{abs(c['difference']):,.2f} difference (usually the tax line or a cast).")
+        add("high",
+            f"Profit & loss (table {c['table']}): {c['check']} is {c['stated']:,.2f} "
+            f"but should be {c['expected']:,.2f} (out by {abs(c['difference']):,.2f}).",
+            "Correct the difference — usually the tax line or a mis-cast subtotal.")
     for c in findings.get("tally_checks", []):
-        add("high", f"'{c['label']}' (table {c['table']}): the line items add to "
-                    f"{c['sum_of_parts']:,.2f} but the stated total is {c['stated_total']:,.2f}. "
-                    f"Reconcile the {abs(c['difference']):,.2f} difference.")
+        add("high",
+            f"'{c['label']}' (table {c['table']}): the line items add to {c['sum_of_parts']:,.2f} "
+            f"but the stated total is {c['stated_total']:,.2f} (out by {abs(c['difference']):,.2f}).",
+            "Reconcile the individual lines to the subtotal.")
     for c in findings.get("row_checks", []):
-        add("high", f"'{c['row']}' (table {c['table']}): the row casts across to "
-                    f"{c['sum_across']:,.2f} but the total column shows {c['stated_total']:,.2f}. "
-                    f"Correct the {abs(c['difference']):,.2f} difference.")
+        add("high",
+            f"'{c['row']}' (table {c['table']}): the row casts across to {c['sum_across']:,.2f} "
+            f"but the total column shows {c['stated_total']:,.2f} (out by {abs(c['difference']):,.2f}).",
+            "Correct the cross-add so the row totals across correctly.")
     for c in findings.get("cross_checks", []):
-        add("high", f"{c['check']} — {c['left']:,.2f} vs {c['right']:,.2f}. Correct the "
-                    f"{abs(c['difference']):,.2f} difference.")
+        add("high",
+            f"{c['check']} — {c['left']:,.2f} vs {c['right']:,.2f} (out by {abs(c['difference']):,.2f}).",
+            "Correct the figures so the two statements tie.")
     gc = findings.get("going_concern", {})
     if gc.get("at_risk"):
         why = ("a net liabilities position" if gc.get("bs_insolvent")
@@ -2067,31 +2128,43 @@ def build_corrections(findings):
                else "losses / negative operating cash-flow indicators")
         missing = [e["element"] for e in gc.get("elements", []) if not e.get("present")]
         if missing:
-            add("high", f"Going concern: the company shows {why}, so strengthen the going-concern "
-                        f"note — add / confirm: {', '.join(missing)}.")
+            add("high",
+                f"Going concern: the company shows {why}, but the note omits: {', '.join(missing)}.",
+                "Strengthen the going-concern note to add and confirm the missing elements.")
         else:
-            add("medium", f"Going concern: the company shows {why}; confirm the note fully covers "
-                          f"financial support, material uncertainty, the 12-month assessment and the "
-                          f"directors' conclusion.")
+            add("medium",
+                f"Going concern: the company shows {why}.",
+                "Confirm the note fully covers financial support, material uncertainty, the "
+                "12-month assessment and the directors' conclusion.")
     for c in gc.get("contradictions", []):
-        add("high", "Going concern: " + c)
+        add("high", "Going concern contradiction: " + c,
+            "Reconcile the going-concern narrative with the reported figures.")
     ac = findings.get("acra", {})
     fs_sc, reg = ac.get("fs_share_capital"), ac.get("registered_share_capital")
     if fs_sc is not None and reg is not None and not ac.get("share_capital_matches"):
-        add("high", f"Share capital: the accounts show ${fs_sc:,.2f} but ACRA records "
-                    f"${reg:,.2f} issued & paid-up. Reconcile the ${abs(reg - fs_sc):,.2f} "
-                    f"difference (check number of shares vs dollar amount, or a post-year-end allotment).")
+        add("high",
+            f"Share capital: the accounts show ${fs_sc:,.2f} but ACRA records ${reg:,.2f} "
+            f"issued & paid-up (out by ${abs(reg - fs_sc):,.2f}).",
+            "Reconcile the difference — check number of shares vs the dollar amount, or a "
+            "post-year-end allotment.")
     if ac.get("found") and ac.get("name_matches") is False:
-        add("medium", f"Company name differs from ACRA ('{ac.get('official_name')}') — correct it in the accounts.")
+        add("medium",
+            f"Company name differs from ACRA ('{ac.get('official_name')}').",
+            "Correct the company name in the accounts to match ACRA.")
     for g in findings.get("language_issues", []):
-        add("low", f"Replace \"{g['found']}\" with \"{g['suggest']}\" ({g.get('kind', 'wording')}).")
+        add("low",
+            f"\"{g['found']}\" ({g.get('kind', 'wording')}).",
+            f"Replace with \"{g['suggest']}\".")
     ai = findings.get("ai", {})
     for o in (ai.get("frs_observations") or []):
-        rec = o.get("recommendation") or o.get("issue")
-        if rec:
+        rec = o.get("recommendation")
+        issue = o.get("issue") or o.get("detail")
+        if rec or issue:
             area = o.get("area") or o.get("frs") or "FRS"
             sev = str(o.get("severity", "medium")).lower()
-            add(sev if sev in ("high", "medium", "low") else "medium", f"{area}: {rec}")
+            err = f"{area}: {issue}" if issue else f"{area}: {rec}"
+            add(sev if sev in ("high", "medium", "low") else "medium",
+                err, rec or "See the FRS observation above.")
 
     order = {"high": 0, "medium": 1, "low": 2}
     C.sort(key=lambda x: order.get(x["severity"], 3))
@@ -2108,6 +2181,7 @@ def review_docx(path):
         "pl_checks": [], "row_checks": [], "cross_checks": [],
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
+               "corrected_figures": [], "suggested_wording": [],
                "grammar_issues": [], "narrative": ""},
         "acra": {"enabled": False, "error": None, "uen": None, "found": False,
                  "official_name": None, "status": None, "address": None,
@@ -2192,6 +2266,7 @@ def basic_review(path, ext):
         "pl_checks": [], "row_checks": [],
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
+               "corrected_figures": [], "suggested_wording": [],
                "grammar_issues": [], "narrative": ""},
         "acra": {"enabled": False, "error": None, "uen": None, "found": False,
                  "official_name": None, "status": None, "address": None,
@@ -2309,7 +2384,7 @@ def build_word_report(record):
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
-    DARK, RED, GREEN = "1F3864", "FCE4D6", "E2EFDA"
+    DARK, RED, GREEN, AMBER = "1F3864", "FCE4D6", "E2EFDA", "FFF2CC"
     f = record["findings"]
 
     def setfont(run, size=10, bold=False, color=None):
@@ -2374,10 +2449,15 @@ def build_word_report(record):
 
         if f.get("corrections"):
             H("Corrections to make")
-            body("Action points to work through before finalising:")
-            tags = {"high": "[High] ", "medium": "[Medium] ", "low": "[Minor] "}
-            for i, c in enumerate(f["corrections"], 1):
-                body(f"{i}. {tags.get(c.get('severity', ''), '')}{c['text']}")
+            body("Each row shows the error found and the recommended correction.")
+            sevlabel = {"high": "High", "medium": "Medium", "low": "Minor"}
+            table(["#", "Severity", "Error found", "Recommended correction"],
+                  [[str(i), sevlabel.get(c.get("severity", ""), ""),
+                    c.get("error", c.get("text", "")), c.get("recommendation", "")]
+                   for i, c in enumerate(f["corrections"], 1)],
+                  [RED if c.get("severity") == "high"
+                   else AMBER if c.get("severity") == "medium" else None
+                   for c in f["corrections"]])
 
         H("Numerical & arithmetic findings")
         if f["tally_checks"] or f["pl_checks"] or f["row_checks"] or f.get("cross_checks") or \
@@ -2417,6 +2497,21 @@ def build_word_report(record):
                         ((o.get("area", "") or "") + (" (" + o.get("frs", "") + ")" if o.get("frs") else "")).strip(),
                         (o.get("issue", "") or "") + ((" — " + o.get("detail", "")) if o.get("detail") else ""),
                         o.get("recommendation", "")] for o in ai["frs_observations"]])
+            if ai.get("corrected_figures"):
+                H("Corrected figures — ready to paste")
+                for c in ai["corrected_figures"]:
+                    body(c.get("statement", ""), 11, True)
+                    if c.get("issue"):
+                        body(c["issue"], 9)
+                    for line in (c.get("corrected", "") or "").split("\n"):
+                        body(line, 10)
+                    if c.get("note"):
+                        body(c["note"], 9)
+            if ai.get("suggested_wording"):
+                H("Suggested replacement wording")
+                for s in ai["suggested_wording"]:
+                    body(s.get("note", ""), 11, True)
+                    body(s.get("draft", ""), 10)
             if ai.get("grammar_issues"):
                 H("Grammar & wording")
                 table(["Location", "Current", "Suggested"],
