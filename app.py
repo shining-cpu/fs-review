@@ -1884,6 +1884,32 @@ reporting period; FRS 33 EPS if applicable; capital management; dividends.
 the company name and financial-year dates, and that every note cross-reference points to \
 the correct note.
 
+COMMON DRAFTING ERRORS — check each of these specifically, they recur in SME drafts:
+ - INCOME TAX CONSISTENCY: the income tax expense on the face of the profit & loss MUST equal \
+the tax charge in the income-tax note and the effective-tax-rate reconciliation, and the \
+movement in the balance-sheet tax provision (opening + charge − tax paid) must agree. If the \
+face figure differs from the note (e.g. face shows a larger provision than the note's \
+computed charge), flag it, state both figures, and note that the profit for the year is \
+wrong by the difference.
+ - LOANS TO / FROM DIRECTORS: any "amount due from director" (a loan TO a director) is a \
+serious point — flag Companies Act 1967 section 162 (loans to directors are generally \
+prohibited) and ask for confirmation of legality/exemption; for any material amount due \
+to/from a director or shareholder, require FRS 24 disclosure of the terms (interest, \
+security, repayment) and, for a receivable, a recoverability / ECL assessment. Note if the \
+balance is a large proportion of total assets.
+ - RETAINED EARNINGS TIE: retained earnings on the balance sheet MUST equal the closing \
+retained earnings in the statement of changes in equity. If the balance sheet shows retained \
+earnings before dividends with the dividend as a separate line while the SOCE shows it net, \
+flag the presentation inconsistency.
+ - DIVIDENDS: if a dividend is described as "payable" / declared but unpaid, it must appear \
+as a liability on the balance sheet and must NOT be shown as a cash outflow in the financing \
+section of the cash-flow statement; flag any inconsistency.
+ - POLICY WITHOUT THE ASSET: if there is an accounting-policy or useful-life note for an \
+asset class (e.g. property, plant and equipment) but that asset does not appear on the \
+balance sheet, flag the redundant policy.
+ - COMPARATIVES: every line and note must show the prior-year comparative; flag any line \
+whose comparative is blank while the total column includes it.
+
 SHARE CAPITAL — be precise: state the issued and paid-up share capital shown in the \
 accounts as a dollar figure, check it is consistent across the statement of financial \
 position, the statement of changes in equity and the share-capital note, and that it \
@@ -1999,6 +2025,8 @@ def _findings_context(findings):
     for c in (findings.get("cross_checks") or []):
         L.append(f"- Cross-statement: {c['check']} — {c['left']:,.2f} vs {c['right']:,.2f} "
                  f"(diff {c['difference']:,.2f}).")
+    for rp in (findings.get("related_party") or []):
+        L.append(f"- Related party: {rp['error']} ({rp['recommendation']})")
     ca = findings.get("cash_anchor") or {}
     if ca.get("closing") is not None:
         if ca.get("opening") is not None:
@@ -2293,6 +2321,59 @@ def cash_anchor(doc):
     return None
 
 
+def check_related_party_loans(doc):
+    """Flag director/shareholder balances on the balance sheet. A loan TO a director
+    is a Companies Act 1967 s.162 point; any material related-party balance needs FRS
+    24 disclosure. Conservative: only scans the balance-sheet table (total assets /
+    current liabilities present) so it doesn't double-fire on note tables."""
+    out = []
+    for table in doc.tables:
+        labels, numgrid = _grid(table)
+        low_all = " ".join(labels).lower()
+        if "total current liabilit" not in low_all and "total asset" not in low_all:
+            continue
+        skip = _note_columns(table)
+        ncols = max((len(r) for r in numgrid), default=0)
+        moneycols = [c for c in range(1, ncols) if c not in skip]
+        for r, label in enumerate(labels):
+            low = label.lower().strip()
+            vals = [numgrid[r][c] for c in moneycols
+                    if c < len(numgrid[r]) and numgrid[r][c] is not None]
+            amt = (vals[-2] if len(vals) >= 2 else vals[-1]) if vals else None
+            if amt is None or abs(amt) < 100:      # ignore trivial/immaterial balances
+                continue
+            if any(k in low for k in ("due from director", "due from a director",
+                                      "loan to director", "loan to a director",
+                                      "loan to the director", "receivable from director")):
+                out.append({"severity": "high", "kind": "loan to director",
+                    "error": f"'{label.strip()}' of ${amt:,.2f} is an amount owed by a "
+                             f"director to the company (a loan to a director).",
+                    "recommendation": "Confirm this complies with Companies Act 1967 "
+                             "section 162 (loans to directors are generally prohibited); "
+                             "disclose the terms (interest, security, repayment) under FRS 24; "
+                             "and assess its recoverability (expected credit loss)."})
+            elif any(k in low for k in ("due from shareholder", "due from a shareholder",
+                                        "due from related", "amount due from holding")):
+                out.append({"severity": "medium", "kind": "due from related party",
+                    "error": f"'{label.strip()}' of ${amt:,.2f} is a related-party receivable.",
+                    "recommendation": "Disclose the terms (interest, security, repayment) under "
+                             "FRS 24 and assess recoverability."})
+            elif any(k in low for k in ("due to director", "due to a director",
+                                        "due to shareholder", "due to a shareholder",
+                                        "due to related", "amount due to holding")):
+                out.append({"severity": "medium", "kind": "due to related party",
+                    "error": f"'{label.strip()}' of ${amt:,.2f} is a related-party balance.",
+                    "recommendation": "Disclose the nature and terms (interest, repayment, "
+                             "security) under FRS 24."})
+    seen, uniq = set(), []
+    for o in out:
+        k = (o["kind"], o["error"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(o)
+    return uniq
+
+
 def build_corrections(findings):
     """Turn every finding into a concrete correction, split into the ERROR (what is
     wrong) and the RECOMMENDATION (what to do about it)."""
@@ -2333,6 +2414,8 @@ def build_corrections(findings):
         add("high",
             f"{c['check']} — {c['left']:,.2f} vs {c['right']:,.2f} (out by {abs(c['difference']):,.2f}).",
             "Correct the figures so the two statements tie.")
+    for rp in findings.get("related_party", []):
+        add(rp["severity"], rp["error"], rp["recommendation"])
     gc = findings.get("going_concern", {})
     if gc.get("at_risk"):
         why = ("a net liabilities position" if gc.get("bs_insolvent")
@@ -2406,6 +2489,7 @@ def review_docx(path):
         "tables": 0, "paragraph_count": 0,
         "tally_checks": [], "balance_checks": [],
         "pl_checks": [], "row_checks": [], "cross_checks": [], "cash_anchor": None,
+        "related_party": [],
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
                "corrected_figures": [], "suggested_wording": [],
@@ -2453,6 +2537,7 @@ def review_docx(path):
     findings["balance_checks"] = check_balance_equation(doc)
     findings["cross_checks"] = check_cross_statements(doc)
     findings["cash_anchor"] = cash_anchor(doc)
+    findings["related_party"] = check_related_party_loans(doc)
     findings["language_issues"] = check_language(doc)
     findings["frs_checks"] = check_frs(full_text_low, "inventor" in full_text_low)
     findings["going_concern"] = assess_going_concern(doc, full_text_low)
