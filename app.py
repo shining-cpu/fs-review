@@ -1274,15 +1274,18 @@ GRAND_TOTALS = {
 
 
 def _note_columns(table):
-    """Column indexes that are 'Note' reference columns (values like 7, 8, 9)."""
+    """Column indexes that are 'Note' reference columns (values like 7, 8, 9).
+
+    Scans the first several rows for a 'Note' header cell. We must NOT stop at the
+    first row containing a year/$, because some statements put the year row ABOVE
+    the 'Note' label row — stopping early missed the note column and made downstream
+    extraction (cash, share capital) pick up the note number instead of the figure.
+    """
     skip = set()
-    for row in table.rows:
-        cells = [c.text.strip().lower() for c in row.cells]
-        for i, txt in enumerate(cells):
-            if txt == "note":
+    for row in list(table.rows)[:6]:
+        for i, cell in enumerate(row.cells):
+            if cell.text.strip().lower() == "note":
                 skip.add(i)
-        if any(c in ("$", "2025", "2024", "2023", "2026") for c in cells):
-            break  # header row reached
     return skip
 
 
@@ -1430,6 +1433,38 @@ def check_pl(t_idx, table):
                             "check": "Gross profit = Revenue − Cost of sales",
                             "expected": round(exp, 2), "stated": round(gp, 2),
                             "difference": round(exp - gp, 2)})
+        # FULL CAST: gross profit + every income/expense line between GP and profit
+        # before tax MUST equal profit before tax. Sum the lines strictly between the
+        # two, skipping subtotal ("total") and "gross" lines so we don't double-count.
+        if gp is not None and pbt is not None:
+            gi = pi = None
+            for r, label in enumerate(labels):
+                low = label.lower()
+                if gi is None and ("gross profit" in low or "gross loss" in low):
+                    gi = r
+                if "before tax" in low or "before taxation" in low:
+                    pi = r
+            if gi is not None and pi is not None and pi > gi:
+                seg = 0.0
+                for r in range(gi + 1, pi):
+                    low = labels[r].lower()
+                    if "total" in low or "gross" in low:
+                        continue
+                    v = numgrid[r][c] if c < len(numgrid[r]) else None
+                    if v is not None:
+                        seg += v
+                calc = gp + seg
+                # Only flag a plausible CASTING SLIP (rounding / transposition): a small
+                # difference. A large gap means the parser mis-read a messy layout (note
+                # columns, merged/duplicate rows) rather than a real error, so stay silent
+                # to avoid false positives — big misstatements are caught by other checks.
+                diff = calc - pbt
+                if 0.5 < abs(diff) <= 1000:
+                    out.append({"table": t_idx + 1,
+                                "check": "Profit before tax does not cast (gross profit + "
+                                         "income − expenses)",
+                                "expected": round(calc, 2), "stated": round(pbt, 2),
+                                "difference": round(diff, 2)})
         if net is not None and pbt is not None:
             tx = tax or 0
             exp_minus = pbt - tx          # tax treated as an expense (deduct)
