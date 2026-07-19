@@ -294,6 +294,7 @@ REPORT_HTML = """{% extends "base.html" %}
   <p style="margin-top:14px">
     <a class="btn secondary" href="{{ url_for('download', rec_id=r.id) }}">Download original</a>
     <a class="btn" href="{{ url_for('download_report', rec_id=r.id) }}">Download review report (Word)</a>
+    {% if r.ext == '.docx' %}<a class="btn" href="{{ url_for('download_revised', rec_id=r.id) }}">Download revised FS (marked up)</a>{% endif %}
   </p>
 </div>
 
@@ -3213,6 +3214,177 @@ def build_word_report(record):
                       "FRS/IFRS compliance review by a qualified reviewer."), 8, False, "808080")
     buf = io.BytesIO(); doc.save(buf); buf.seek(0)
     return buf
+
+
+def build_marked_fs(record, file_bytes):
+    """Revised FS module: return the ORIGINAL financial statements .docx with the
+    review's recommendations marked up in place —
+      - text corrections applied as real Word tracked changes (accept/reject in Word),
+      - reviewer comment boxes inserted directly under the flagged tables,
+      - the full punch-list on a review cover page,
+      - proposed additional disclosures appended (marked as proposed insertions)."""
+    from docx import Document as _Doc
+    from docx.shared import Pt, RGBColor
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    doc = _Doc(io.BytesIO(file_bytes))
+    f = record["findings"]
+    AUTHOR = "FS Review"
+    STAMP = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    _rid = [9001]
+
+    def _tracked_replace(par, old, new):
+        """Replace old->new inside one run of par as a Word tracked change."""
+        for run in par.runs:
+            if old and old in (run.text or ""):
+                before, _, after = run.text.partition(old)
+                run.text = before
+                anchor = run._element
+                d = OxmlElement("w:del")
+                d.set(qn("w:id"), str(_rid[0])); _rid[0] += 1
+                d.set(qn("w:author"), AUTHOR); d.set(qn("w:date"), STAMP)
+                dr = OxmlElement("w:r"); dtx = OxmlElement("w:delText")
+                dtx.set(qn("xml:space"), "preserve"); dtx.text = old
+                dr.append(dtx); d.append(dr)
+                ins = OxmlElement("w:ins")
+                ins.set(qn("w:id"), str(_rid[0])); _rid[0] += 1
+                ins.set(qn("w:author"), AUTHOR); ins.set(qn("w:date"), STAMP)
+                ir = OxmlElement("w:r"); it = OxmlElement("w:t")
+                it.set(qn("xml:space"), "preserve"); it.text = new
+                ir.append(it); ins.append(ir)
+                anchor.addnext(ins); anchor.addnext(d)
+                if after:
+                    tr = OxmlElement("w:r"); tt = OxmlElement("w:t")
+                    tt.set(qn("xml:space"), "preserve"); tt.text = after
+                    tr.append(tt); ins.addnext(tr)
+                return True
+        return False
+
+    def _comment_par(text, fill="FFF2CC", color="7A5C00", bold_prefix="[REVIEW] "):
+        """Build a highlighted reviewer-comment paragraph (returned detached)."""
+        p = doc.add_paragraph()
+        r1 = p.add_run(bold_prefix); r1.bold = True
+        r2 = p.add_run(text)
+        for r in (r1, r2):
+            r.font.size = Pt(9)
+            r.font.color.rgb = RGBColor.from_string(color)
+        pPr = p._p.get_or_add_pPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear"); shd.set(qn("w:fill"), fill)
+        pPr.append(shd)
+        return p
+
+    # --- 1) Tracked-change text corrections (typos + AI grammar suggestions) ---
+    fixes = [(g.get("found"), g.get("suggest")) for g in (f.get("language_issues") or [])]
+    fixes += [(g.get("current"), g.get("suggested"))
+              for g in ((f.get("ai") or {}).get("grammar_issues") or [])]
+    applied = 0
+    for old, new in fixes:
+        if not old or not new or old == new or len(old) > 300:
+            continue
+        for par in doc.paragraphs:
+            if _tracked_replace(par, old, new):
+                applied += 1
+                break
+        else:
+            for tbl in doc.tables:
+                done = False
+                for row in tbl.rows:
+                    for cell in row.cells:
+                        for par in cell.paragraphs:
+                            if _tracked_replace(par, old, new):
+                                applied += 1; done = True; break
+                        if done: break
+                    if done: break
+                if done: break
+
+    # --- 2) Reviewer comments anchored under the flagged tables ---
+    by_table = {}
+    for c in (f.get("pl_checks") or []):
+        by_table.setdefault(c.get("table"), []).append(
+            f"{c['check']} — computed {c['expected']:,.2f} vs stated {c['stated']:,.2f}.")
+    for c in (f.get("tally_checks") or []):
+        by_table.setdefault(c.get("table"), []).append(
+            f"'{c['label']}': lines add to {c['sum_of_parts']:,.2f} but stated "
+            f"{c['stated_total']:,.2f} — reconcile.")
+    for c in (f.get("row_checks") or []):
+        by_table.setdefault(c.get("table"), []).append(
+            f"'{c['row']}': casts across to {c['sum_across']:,.2f} vs total "
+            f"{c['stated_total']:,.2f} — correct.")
+    for t_idx, notes in sorted(by_table.items(), reverse=True):
+        if not t_idx or t_idx > len(doc.tables):
+            continue
+        tbl = doc.tables[t_idx - 1]
+        for note in reversed(notes):
+            p = _comment_par(note)
+            tbl._element.addnext(p._p)
+
+    # --- 3) Review cover: full punch-list + legend, inserted at the very top ---
+    first = doc.paragraphs[0]._p if doc.paragraphs else None
+    cover = []
+    t = doc.add_paragraph(); r = t.add_run("FS REVIEW — RECOMMENDED REVISIONS (MARKED UP)")
+    r.bold = True; r.font.size = Pt(14); r.font.color.rgb = RGBColor.from_string("1F3864")
+    cover.append(t)
+    lg = doc.add_paragraph()
+    r = lg.add_run("Text corrections are marked as tracked changes (accept/reject in Word). "
+                   "Yellow [REVIEW] boxes flag figures to correct. Proposed additional "
+                   "disclosures are appended at the end in blue. Generated " +
+                   dt.datetime.utcnow().strftime("%d %b %Y") + ".")
+    r.font.size = Pt(9); r.italic = True
+    cover.append(lg)
+    sevlabel = {"high": "HIGH", "medium": "MEDIUM", "low": "minor"}
+    for i, c in enumerate((f.get("corrections") or []), 1):
+        p = doc.add_paragraph()
+        r = p.add_run(f"{i}. [{sevlabel.get(c.get('severity'), '')}] ")
+        r.bold = True; r.font.size = Pt(9)
+        r2 = p.add_run(f"{c.get('error', '')}  →  {c.get('recommendation', '')}")
+        r2.font.size = Pt(9)
+        cover.append(p)
+    pb = doc.add_paragraph(); pb.add_run().add_break()  # spacer before original content
+    cover.append(pb)
+    if first is not None:
+        for p in reversed(cover):
+            first.addprevious(p._p)
+
+    # --- 4) Proposed additional disclosures, appended as insertions ---
+    if f.get("disclosure_templates"):
+        hp = doc.add_paragraph()
+        r = hp.add_run("PROPOSED ADDITIONAL DISCLOSURES (INSERT — adapt [bracketed] items)")
+        r.bold = True; r.font.size = Pt(12); r.font.color.rgb = RGBColor.from_string("1F3864")
+        for tdef in f["disclosure_templates"]:
+            tp = doc.add_paragraph()
+            r = tp.add_run(tdef.get("title", "")); r.bold = True
+            r.font.color.rgb = RGBColor.from_string("2E5496"); r.font.size = Pt(11)
+            for line in (tdef.get("body", "") or "").split("\n"):
+                bp = doc.add_paragraph()
+                br = bp.add_run(line)
+                br.font.color.rgb = RGBColor.from_string("2E5496")
+                br.font.size = Pt(10)
+                br.underline = True
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/report/<rec_id>/revised.docx")
+@login_required
+def download_revised(rec_id):
+    """Download the original FS with the review's recommendations marked up."""
+    from flask import send_file
+    record = get_record(rec_id)
+    got = get_record_file(rec_id)
+    if not record or not got:
+        abort(404)
+    name, data = got
+    if not name.lower().endswith(".docx"):
+        abort(400)
+    buf = build_marked_fs(record, data)
+    out = os.path.splitext(record["original_name"])[0] + "_revised (marked up).docx"
+    return send_file(buf, as_attachment=True, download_name=out,
+                     mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 @app.route("/report/<rec_id>/report.docx")
