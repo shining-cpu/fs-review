@@ -1477,10 +1477,13 @@ def check_pl(t_idx, table):
                 # usually a prior-year over-provision credit shown without brackets.
                 # Flag softly as a presentation point, not a hard casting error.
                 out.append({"table": t_idx + 1,
-                            "check": ("Income tax of {:,.2f} is added back (reducing the "
-                                      "loss), not deducted — if it is a genuine expense the "
-                                      "loss should be {:,.2f}; if a prior-year over-provision "
-                                      "credit, show it in brackets".format(abs(tx), exp_minus)),
+                            "check": ("Income tax of {:,.2f} is added back (a net credit), "
+                                      "not deducted — acceptable if it is a prior-year "
+                                      "over-provision / refund, but it should then be shown "
+                                      "in brackets and disclosed as an over-provision line "
+                                      "in the tax note; if it is a genuine expense the "
+                                      "profit/loss for the year should be "
+                                      "{:,.2f}".format(abs(tx), exp_minus)),
                             "expected": round(exp_minus, 2), "stated": round(net, 2),
                             "difference": round(exp_minus - net, 2),
                             "kind": "tax sign / presentation"})
@@ -1921,11 +1924,17 @@ the correct note.
 
 COMMON DRAFTING ERRORS — check each of these specifically, they recur in SME drafts:
  - INCOME TAX CONSISTENCY: the income tax expense on the face of the profit & loss MUST equal \
-the tax charge in the income-tax note and the effective-tax-rate reconciliation, and the \
-movement in the balance-sheet tax provision (opening + charge − tax paid) must agree. If the \
-face figure differs from the note (e.g. face shows a larger provision than the note's \
-computed charge), flag it, state both figures, and note that the profit for the year is \
-wrong by the difference.
+the TOTAL tax charge in the income-tax note, and the movement in the balance-sheet tax \
+provision (opening + total charge − tax paid) must agree. IMPORTANT: an over- or \
+under-provision in respect of prior years is a NORMAL, ACCEPTABLE component of the tax \
+charge — total charge = current-year tax ± prior-year under/(over)-provision. So if the face \
+figure differs from the note's current-year tax, first test whether the difference is a \
+prior-year under/over-provision that makes the provision roll-forward tie; if it does, do \
+NOT call the figures wrong — instead check the tax note discloses the under/(over)-provision \
+as a separate line (e.g. "(Over)/under-provision in respect of prior year"), and recommend \
+adding that line if missing. Only flag an ERROR when the figures cannot be reconciled even \
+allowing for a prior-year provision adjustment. An over-provision credit should be shown in \
+brackets.
  - LOANS TO / FROM DIRECTORS: any "amount due from director" (a loan TO a director) is a \
 serious point — flag Companies Act 1967 section 162 (loans to directors are generally \
 prohibited) and ask for confirmation of legality/exemption; for any material amount due \
@@ -2428,8 +2437,10 @@ def build_corrections(findings):
         if c.get("kind") == "tax sign / presentation":
             add("medium",
                 f"Profit & loss (table {c['table']}): {c['check']}.",
-                "Confirm whether the tax figure is a prior-year over-provision credit "
-                "(show it in brackets) or a genuine expense (which would increase the loss).")
+                "A prior-year over/under-provision is acceptable — if so, show the credit "
+                "in brackets and disclose an '(Over)/under-provision in respect of prior "
+                "year' line in the tax note. Only if it is a genuine current-year expense "
+                "does the profit/loss need restating.")
         else:
             add("high",
                 f"Profit & loss (table {c['table']}): {c['check']} is {c['stated']:,.2f} "
