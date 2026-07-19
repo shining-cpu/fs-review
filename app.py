@@ -2543,6 +2543,146 @@ def check_cross_statements(doc):
     return out
 
 
+# Captions whose NOTE figure must tally back to the face of the P&L / balance
+# sheet. (keys to match, labels to exclude). Income tax is deliberately absent —
+# a face-vs-note tax difference can be a legitimate prior-year over/under-provision.
+# (caption, matching keys, label excludes, max note-table rows or None).
+# The row cap keeps P&L captions away from long breakdown statements.
+NOTE_FACE_ITEMS = [
+    ("Revenue", ("revenue",), ("cost",), 8),
+    ("Cost of sales", ("cost of sales", "cost of goods"), (), 8),
+    ("Administrative expenses",
+     ("administrative expenses", "general and administrative"), (), 8),
+    ("Cash and bank balances",
+     ("cash and bank balance", "cash and cash equivalents", "cash at bank"),
+     ("beginning", "end of", "net ", "flow"), None),
+    ("Trade and other receivables",
+     ("trade and other receivable", "trade receivable", "accounts receivable",
+      "account receivable"), (), None),
+    ("Trade and other payables",
+     ("trade and other payable", "other payables", "accounts payable",
+      "account payable"), (), None),
+    ("Amount due from director", ("amount due from director",), (), None),
+    ("Amount due to director", ("amount due to director",), (), None),
+    ("Amount due from shareholder", ("amount due from shareholder",), (), None),
+    ("Amount due to shareholder", ("amount due to shareholder",), (), None),
+]
+
+
+def _row_vals_unique(row):
+    """Numeric values in a row, counting merged cells once, excluding column 0."""
+    seen, vals = set(), []
+    for i, cell in enumerate(row.cells):
+        tc = id(cell._tc)
+        if tc in seen:
+            continue
+        seen.add(tc)
+        if i == 0:
+            continue
+        v = _to_number(cell.text)
+        if v is not None:
+            vals.append(v)
+    return vals
+
+
+def check_note_face_ties(doc):
+    """Every note figure must tally back to the same caption on the face of the
+    P&L / balance sheet (current year). Conservative, tested against real sets:
+    - labels match by PREFIX and the note must match the SAME key as the face
+      (so 'Other payables' is never compared against 'Trade and other payables');
+    - note-reference columns are skipped and merged cells counted once;
+    - cash-flow / SOCE tables are excluded (their movement lines share captions);
+    - a note also ties if its unlabeled TOTAL row matches the face (a matched
+      component line inside a breakdown is not a mismatch);
+    - magnitudes are compared, so bracket conventions don't false-positive."""
+    tables = list(doc.tables)
+
+    def tbl_text(t):
+        return " ".join(c.text for r in t.rows for c in r.cells).lower()
+
+    BAD = ("increase", "decrease", "changes in", "movement")
+    pl_idx = bs_idx = None
+    skip_tables = set()
+    for i, t in enumerate(tables):
+        txt = tbl_text(t)
+        if pl_idx is None and "before tax" in txt and ("revenue" in txt or "gross profit" in txt):
+            pl_idx = i
+        if bs_idx is None and ("total assets" in txt or "total equity and liabilities" in txt):
+            bs_idx = i
+        if "cash flows from" in txt:
+            skip_tables.add(i)
+    face_ids = {i for i in (pl_idx, bs_idx) if i is not None}
+    if not face_ids:
+        return []
+
+    def vals_of(row, skipcols):
+        seen, vals = set(), []
+        for i, cell in enumerate(row.cells):
+            tc = id(cell._tc)
+            if tc in seen:
+                continue
+            seen.add(tc)
+            if i == 0 or i in skipcols:
+                continue
+            v = _to_number(cell.text)
+            if v is not None:
+                vals.append(v)
+        return vals
+
+    def find_in(t, keys, excl):
+        """Current-year value of the first row whose label matches a key (prefix)."""
+        skipcols = _note_columns(t)
+        for row in t.rows:
+            label = (row.cells[0].text or "").lower().strip()
+            if any(x in label for x in excl) or any(b in label for b in BAD):
+                continue
+            if any(label == k or label.startswith(k) for k in keys):
+                vals = vals_of(row, skipcols)
+                if vals:
+                    return vals[-2] if len(vals) >= 2 else vals[-1]
+        return None
+
+    def table_total(t):
+        """Current-year value of the table's unlabeled total row, if any."""
+        skipcols = _note_columns(t)
+        best = None
+        for row in t.rows:
+            label = (row.cells[0].text or "").strip()
+            vals = vals_of(row, skipcols)
+            if not label and vals:
+                best = vals[-2] if len(vals) >= 2 else vals[-1]
+        return best
+
+    out = []
+    for item, keys, excl, max_rows in NOTE_FACE_ITEMS:
+        face = None
+        for fi in (pl_idx, bs_idx):
+            if fi is None:
+                continue
+            face = find_in(tables[fi], keys, excl)
+            if face is not None:
+                break
+        if face is None:
+            continue
+        for j, t in enumerate(tables):
+            if j in face_ids or j in skip_tables:
+                continue
+            if max_rows and len(t.rows) > max_rows:
+                continue
+            v = find_in(t, keys, excl)
+            if v is None or abs(abs(v) - abs(face)) <= 0.5:
+                continue
+            tot = table_total(t)
+            if tot is not None and abs(abs(tot) - abs(face)) <= 0.5:
+                continue                      # the note's total ties — component match
+            out.append({"check": f"Note-to-statement tie: '{item}' — a note shows "
+                                 f"{abs(v):,.2f} but the statement shows {abs(face):,.2f}",
+                        "left": round(abs(v), 2), "right": round(abs(face), 2),
+                        "difference": round(abs(v) - abs(face), 2)})
+            break
+    return out
+
+
 def cash_anchor(doc):
     """Deterministic ground-truth cash figures from the balance sheet, so the AI
     has the correct closing/opening cash and net movement to rebuild the cash-flow
@@ -2901,7 +3041,7 @@ def review_docx(path):
         findings["row_checks"].extend(check_row_totals(t_idx, table))
 
     findings["balance_checks"] = check_balance_equation(doc)
-    findings["cross_checks"] = check_cross_statements(doc)
+    findings["cross_checks"] = check_cross_statements(doc) + check_note_face_ties(doc)
     findings["cash_anchor"] = cash_anchor(doc)
     findings["related_party"] = check_related_party_loans(doc)
     findings["language_issues"] = check_language(doc)
@@ -3388,12 +3528,45 @@ def build_marked_fs(record, file_bytes):
     import re as _re
     sevlabel = {"high": "HIGH", "medium": "MEDIUM", "low": "Minor"}
     first_par = next((p for p in doc.paragraphs if (p.text or "").strip()), None)
+
+    # Map disclosure templates so the matching one is embedded INSIDE the comment —
+    # the accountant copies the wording straight from the comment bubble.
+    tmap = {}
+    for tdef in (f.get("disclosure_templates") or []):
+        tl = (tdef.get("title") or "").lower()
+        if "loan to a director" in tl:
+            tmap["s162"] = tdef
+        elif "related party" in tl:
+            tmap["rp"] = tdef
+        elif "going concern" in tl:
+            tmap["gc"] = tdef
+        elif "income tax" in tl:
+            tmap["tax"] = tdef
+
+    def _template_for(low):
+        if "loan to a director" in low or "owed by a director" in low or "s.162" in low \
+                or "section 162" in low:
+            return tmap.get("s162") or tmap.get("rp")
+        if "related-party" in low or "related party" in low or "due to shareholder" in low \
+                or "due from shareholder" in low or "due to director" in low \
+                or "due from director" in low:
+            return tmap.get("rp")
+        if "going concern" in low:
+            return tmap.get("gc")
+        if "added back" in low or "over-provision" in low or "under-provision" in low:
+            return tmap.get("tax")
+        return None
+
     for i, c in enumerate((f.get("corrections") or []), 1):
         err = c.get("error", "") or ""
         rec = c.get("recommendation", "") or ""
         text = (f"Review point {i} [{sevlabel.get(c.get('severity'), '')}]: {err}\n"
                 f"Recommended correction: {rec}")
         low = err.lower()
+        tdef = _template_for(low)
+        if tdef:
+            text += ("\n\nSuggested disclosure — " + tdef.get("title", "") +
+                     " (adapt the [bracketed] items):\n" + (tdef.get("body") or ""))
         anchor = None
         mt = _re.search(r"table (\d+)", low)
         if mt:
