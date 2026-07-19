@@ -3216,13 +3216,51 @@ def build_word_report(record):
     return buf
 
 
+def _inject_comments_part(docx_bytes, comments):
+    """Post-process a .docx: add word/comments.xml (+ rels + content-type) so the
+    w:commentReference anchors placed in the document resolve to real Word margin
+    comments. `comments` is a list of (id, text)."""
+    import zipfile
+    from xml.sax.saxutils import escape
+    stamp = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    items = []
+    for cid, text in comments:
+        paras = "".join(
+            f"<w:p><w:r><w:t xml:space=\"preserve\">{escape(line)}</w:t></w:r></w:p>"
+            for line in (text or "").split("\n"))
+        items.append(f'<w:comment w:id="{cid}" w:author="FS Review" '
+                     f'w:date="{stamp}" w:initials="FSR">{paras}</w:comment>')
+    comments_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:comments xmlns:w="http://schemas.openxmlformats.org/'
+                    'wordprocessingml/2006/main">' + "".join(items) + "</w:comments>")
+    override = (b'<Override PartName="/word/comments.xml" ContentType="application/'
+                b'vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>')
+    rel = (b'<Relationship Id="rIdFsRevCmts" Type="http://schemas.openxmlformats.org/'
+           b'officeDocument/2006/relationships/comments" Target="comments.xml"/>')
+    zin = zipfile.ZipFile(io.BytesIO(docx_bytes))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name in zin.namelist():
+            data = zin.read(name)
+            if name == "[Content_Types].xml" and b"comments+xml" not in data:
+                data = data.replace(b"</Types>", override + b"</Types>")
+            elif name == "word/_rels/document.xml.rels" and b"relationships/comments" not in data:
+                data = data.replace(b"</Relationships>", rel + b"</Relationships>")
+            zout.writestr(name, data)
+        zout.writestr("word/comments.xml", comments_xml)
+    out.seek(0)
+    return out
+
+
 def build_marked_fs(record, file_bytes):
-    """Revised FS module: return the ORIGINAL financial statements .docx with the
-    review's recommendations marked up in place —
-      - text corrections applied as real Word tracked changes (accept/reject in Word),
-      - reviewer comment boxes inserted directly under the flagged tables,
-      - the full punch-list on a review cover page,
-      - proposed additional disclosures appended (marked as proposed insertions)."""
+    """Revised FS module: regenerate the ORIGINAL financial statements .docx as a
+    reviewed draft —
+      - every review point is a real Word margin COMMENT (author "FS Review"),
+        anchored at the relevant statement/table, for staff to work through and
+        resolve in Word's Review pane;
+      - unambiguous text corrections are applied as tracked changes staff can
+        Accept/Reject;
+      - proposed additional disclosures are appended in blue for insertion."""
     from docx import Document as _Doc
     from docx.shared import Pt, RGBColor
     from docx.oxml.ns import qn
@@ -3261,19 +3299,53 @@ def build_marked_fs(record, file_bytes):
                 return True
         return False
 
-    def _comment_par(text, fill="FFF2CC", color="7A5C00", bold_prefix="[REVIEW] "):
-        """Build a highlighted reviewer-comment paragraph (returned detached)."""
-        p = doc.add_paragraph()
-        r1 = p.add_run(bold_prefix); r1.bold = True
-        r2 = p.add_run(text)
-        for r in (r1, r2):
-            r.font.size = Pt(9)
-            r.font.color.rgb = RGBColor.from_string(color)
-        pPr = p._p.get_or_add_pPr()
-        shd = OxmlElement("w:shd")
-        shd.set(qn("w:val"), "clear"); shd.set(qn("w:fill"), fill)
-        pPr.append(shd)
-        return p
+    # ---- Word margin-comment machinery -------------------------------------
+    _comments = []          # (id, text) for the comments part
+    _next_cid = [0]
+
+    def _anchor_comment(par, text):
+        """Attach a margin comment to a paragraph (wraps the whole paragraph)."""
+        cid = _next_cid[0]; _next_cid[0] += 1
+        p = par._p
+        start = OxmlElement("w:commentRangeStart"); start.set(qn("w:id"), str(cid))
+        end = OxmlElement("w:commentRangeEnd"); end.set(qn("w:id"), str(cid))
+        ref_r = OxmlElement("w:r")
+        ref = OxmlElement("w:commentReference"); ref.set(qn("w:id"), str(cid))
+        ref_r.append(ref)
+        pPr = p.find(qn("w:pPr"))
+        if pPr is not None:
+            pPr.addnext(start)
+        else:
+            p.insert(0, start)
+        p.append(end)
+        p.append(ref_r)
+        _comments.append((cid, text))
+
+    def _find_paragraph(*needles, min_len=0):
+        """First paragraph (body or table cell) whose text contains any needle."""
+        needles = [n.lower() for n in needles if n]
+        for par in doc.paragraphs:
+            low = (par.text or "").lower()
+            if len(low) >= min_len and any(n in low for n in needles):
+                return par
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                for cell in row.cells:
+                    for par in cell.paragraphs:
+                        low = (par.text or "").lower()
+                        if len(low) >= min_len and any(n in low for n in needles):
+                            return par
+        return None
+
+    def _table_anchor(t_idx):
+        """First non-empty paragraph inside table t_idx (1-based)."""
+        if t_idx and 0 < t_idx <= len(doc.tables):
+            for row in doc.tables[t_idx - 1].rows:
+                for cell in row.cells:
+                    for par in cell.paragraphs:
+                        if (par.text or "").strip():
+                            return par
+        return None
 
     # --- 1) Tracked-change text corrections (typos + AI grammar suggestions) ---
     fixes = [(g.get("found"), g.get("suggest")) for g in (f.get("language_issues") or [])]
@@ -3300,52 +3372,50 @@ def build_marked_fs(record, file_bytes):
                 if done: break
 
     # --- 2) Reviewer comments anchored under the flagged tables ---
-    by_table = {}
-    for c in (f.get("pl_checks") or []):
-        by_table.setdefault(c.get("table"), []).append(
-            f"{c['check']} — computed {c['expected']:,.2f} vs stated {c['stated']:,.2f}.")
-    for c in (f.get("tally_checks") or []):
-        by_table.setdefault(c.get("table"), []).append(
-            f"'{c['label']}': lines add to {c['sum_of_parts']:,.2f} but stated "
-            f"{c['stated_total']:,.2f} — reconcile.")
-    for c in (f.get("row_checks") or []):
-        by_table.setdefault(c.get("table"), []).append(
-            f"'{c['row']}': casts across to {c['sum_across']:,.2f} vs total "
-            f"{c['stated_total']:,.2f} — correct.")
-    for t_idx, notes in sorted(by_table.items(), reverse=True):
-        if not t_idx or t_idx > len(doc.tables):
-            continue
-        tbl = doc.tables[t_idx - 1]
-        for note in reversed(notes):
-            p = _comment_par(note)
-            tbl._element.addnext(p._p)
-
-    # --- 3) Review cover: full punch-list + legend, inserted at the very top ---
-    first = doc.paragraphs[0]._p if doc.paragraphs else None
-    cover = []
-    t = doc.add_paragraph(); r = t.add_run("FS REVIEW — RECOMMENDED REVISIONS (MARKED UP)")
-    r.bold = True; r.font.size = Pt(14); r.font.color.rgb = RGBColor.from_string("1F3864")
-    cover.append(t)
-    lg = doc.add_paragraph()
-    r = lg.add_run("Text corrections are marked as tracked changes (accept/reject in Word). "
-                   "Yellow [REVIEW] boxes flag figures to correct. Proposed additional "
-                   "disclosures are appended at the end in blue. Generated " +
-                   dt.datetime.utcnow().strftime("%d %b %Y") + ".")
-    r.font.size = Pt(9); r.italic = True
-    cover.append(lg)
-    sevlabel = {"high": "HIGH", "medium": "MEDIUM", "low": "minor"}
+    # ---- Every review point becomes a margin comment at the right spot -----
+    import re as _re
+    sevlabel = {"high": "HIGH", "medium": "MEDIUM", "low": "Minor"}
+    first_par = next((p for p in doc.paragraphs if (p.text or "").strip()), None)
     for i, c in enumerate((f.get("corrections") or []), 1):
-        p = doc.add_paragraph()
-        r = p.add_run(f"{i}. [{sevlabel.get(c.get('severity'), '')}] ")
-        r.bold = True; r.font.size = Pt(9)
-        r2 = p.add_run(f"{c.get('error', '')}  →  {c.get('recommendation', '')}")
-        r2.font.size = Pt(9)
-        cover.append(p)
-    pb = doc.add_paragraph(); pb.add_run().add_break()  # spacer before original content
-    cover.append(pb)
-    if first is not None:
-        for p in reversed(cover):
-            first.addprevious(p._p)
+        err = c.get("error", "") or ""
+        rec = c.get("recommendation", "") or ""
+        text = (f"Review point {i} [{sevlabel.get(c.get('severity'), '')}]: {err}\n"
+                f"Recommended correction: {rec}")
+        low = err.lower()
+        anchor = None
+        mt = _re.search(r"table (\d+)", low)
+        if mt:
+            anchor = _table_anchor(int(mt.group(1)))
+        if anchor is None and "going concern" in low:
+            anchor = _find_paragraph("going concern")
+        if anchor is None and ("due from director" in low or "due to director" in low
+                               or "due from shareholder" in low or "due to shareholder" in low
+                               or "related-party" in low or "related party" in low):
+            anchor = _find_paragraph("due from director", "due to director",
+                                     "due from shareholder", "due to shareholder",
+                                     "due to related", "amount due")
+        if anchor is None and ("does not balance" in low or "balance sheet" in low
+                               or "financial position" in low):
+            anchor = _find_paragraph("total equity and liabilities", "total assets")
+        if anchor is None and "cash" in low:
+            anchor = _find_paragraph("cash flows from operating", "statement of cash flows",
+                                     "cash and cash equivalents")
+        if anchor is None and "share capital" in low:
+            anchor = _find_paragraph("share capital")
+        if anchor is None and "tax" in low:
+            anchor = _find_paragraph("income tax", "taxation")
+        if anchor is None:
+            anchor = first_par
+        if anchor is not None:
+            _anchor_comment(anchor, text)
+
+    # Pointer comment for the appended disclosure templates.
+    if f.get("disclosure_templates") and first_par is not None:
+        names = "; ".join(t.get("title", "") for t in f["disclosure_templates"])
+        _anchor_comment(first_par,
+                        "FS Review: proposed additional disclosures are appended at the end "
+                        "of this document (in blue) — insert into the notes and adapt the "
+                        "[bracketed] items. Templates: " + names + ".")
 
     # --- 4) Proposed additional disclosures, appended as insertions ---
     if f.get("disclosure_templates"):
@@ -3366,6 +3436,8 @@ def build_marked_fs(record, file_bytes):
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
+    if _comments:
+        return _inject_comments_part(buf.read(), _comments)
     return buf
 
 
