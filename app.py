@@ -130,7 +130,7 @@ BASE_HTML = """<!DOCTYPE html>
 </head>
 <body>
   <div class="topbar">
-    <div class="brand">FS Review Portal</div>
+    <div class="brand">{% if has_logo %}<img src="{{ url_for('logo') }}" alt="Assembly Works" style="height:26px;vertical-align:middle;margin-right:10px;background:#fff;border-radius:4px;padding:2px 6px">{% endif %}ASSEMBLY WORKS <span style="font-weight:400;opacity:.85">· FS Review Portal</span></div>
     <div>
       {% if session.get('user') %}
         {% if current_user_can_invite %}<a href="{{ url_for('admin_users') }}" style="margin-right:14px">People</a>{% endif %}
@@ -1336,10 +1336,24 @@ def admin_grant():
     return redirect(url_for("admin_users"))
 
 
+# Firm branding: drop a "logo.png" next to app.py (commit it to the repo) and it
+# appears in the portal header and on the Word review report automatically.
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+
+
+@app.route("/logo.png")
+def logo():
+    from flask import send_file
+    if not os.path.exists(LOGO_PATH):
+        abort(404)
+    return send_file(LOGO_PATH, mimetype="image/png")
+
+
 @app.context_processor
 def inject_globals():
     return {"current_is_admin": is_admin(),
-            "current_user_can_invite": current_can_invite()}
+            "current_user_can_invite": current_can_invite(),
+            "has_logo": os.path.exists(LOGO_PATH)}
 
 
 @app.after_request
@@ -2889,10 +2903,12 @@ def build_corrections(findings):
     for b in findings.get("balance_checks", []):
         if not b.get("balanced"):
             add("high",
-                f"Statement of financial position does not balance — total assets "
-                f"{b['total_assets']:,.2f} vs equity + liabilities {b['equity_plus_liabilities']:,.2f} "
-                f"(out by {abs(b['difference']):,.2f}).",
-                "Investigate the difference and correct it so total assets equal total equity plus liabilities.")
+                f"ARITHMETIC — statement of financial position does not balance. · "
+                f"Total assets stated: {b['total_assets']:,.2f} · "
+                f"Total equity + liabilities: {b['equity_plus_liabilities']:,.2f} · "
+                f"Difference to correct: {abs(b['difference']):,.2f}",
+                "Recheck each subtotal on the balance sheet; total assets must equal "
+                "total equity plus total liabilities.")
     for c in findings.get("pl_checks", []):
         if c.get("kind") == "tax sign / presentation":
             add("medium",
@@ -2903,23 +2919,34 @@ def build_corrections(findings):
                 "does the profit/loss need restating.")
         else:
             add("high",
-                f"Profit & loss (table {c['table']}): {c['check']} is {c['stated']:,.2f} "
-                f"but should be {c['expected']:,.2f} (out by {abs(c['difference']):,.2f}).",
-                "Correct the difference — usually the tax line or a mis-cast subtotal.")
+                f"ARITHMETIC — profit & loss does not cast (table {c['table']}, "
+                f"{c['check']}). · Computed from the figures shown: {c['expected']:,.2f} · "
+                f"Stated in the FS: {c['stated']:,.2f} · "
+                f"Difference to correct: {abs(c['difference']):,.2f}",
+                "Recompute this line — the error is usually in the tax line or a "
+                "mis-cast subtotal.")
     for c in findings.get("tally_checks", []):
         add("high",
-            f"'{c['label']}' (table {c['table']}): the line items add to {c['sum_of_parts']:,.2f} "
-            f"but the stated total is {c['stated_total']:,.2f} (out by {abs(c['difference']):,.2f}).",
-            "Reconcile the individual lines to the subtotal.")
+            f"ARITHMETIC — subtotal does not cast (table {c['table']}, '{c['label']}'). · "
+            f"Sum of the line items above it: {c['sum_of_parts']:,.2f} · "
+            f"Stated subtotal: {c['stated_total']:,.2f} · "
+            f"Difference to correct: {abs(c['difference']):,.2f}",
+            "Re-add the individual lines; either a line item or the stated subtotal "
+            "is wrong.")
     for c in findings.get("row_checks", []):
         add("high",
-            f"'{c['row']}' (table {c['table']}): the row casts across to {c['sum_across']:,.2f} "
-            f"but the total column shows {c['stated_total']:,.2f} (out by {abs(c['difference']):,.2f}).",
-            "Correct the cross-add so the row totals across correctly.")
+            f"ARITHMETIC — row does not cast across (table {c['table']}, '{c['row']}'). · "
+            f"Sum of the columns: {c['sum_across']:,.2f} · "
+            f"Stated total column: {c['stated_total']:,.2f} · "
+            f"Difference to correct: {abs(c['difference']):,.2f}",
+            "Correct the row so the component columns add across to the total column.")
     for c in findings.get("cross_checks", []):
         add("high",
-            f"{c['check']} — {c['left']:,.2f} vs {c['right']:,.2f} (out by {abs(c['difference']):,.2f}).",
-            "Correct the figures so the two statements tie.")
+            f"ARITHMETIC — figures do not tie across statements ({c['check']}). · "
+            f"One side: {c['left']:,.2f} · Other side: {c['right']:,.2f} · "
+            f"Difference to correct: {abs(c['difference']):,.2f}",
+            "These two figures describe the same thing and must be identical — "
+            "correct whichever is wrong so they tie.")
     for rp in findings.get("related_party", []):
         add(rp["severity"], rp["error"], rp["recommendation"])
     gc = findings.get("going_concern", {})
@@ -3236,6 +3263,14 @@ def build_word_report(record):
 
     doc = _Doc()
     doc.styles["Normal"].font.name = "Arial"; doc.styles["Normal"].font.size = Pt(10)
+    # Firm branding: logo if logo.png is present, wordmark otherwise.
+    if os.path.exists(LOGO_PATH):
+        from docx.shared import Inches as _Inches
+        lp = doc.add_paragraph(); lp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        lp.add_run().add_picture(LOGO_PATH, width=_Inches(1.8))
+    else:
+        bp = doc.add_paragraph(); bp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        setfont(bp.add_run("ASSEMBLY WORKS"), 13, True, "2E5496")
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     setfont(p.add_run("FINANCIAL STATEMENTS REVIEW REPORT"), 17, True, DARK)
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -3560,8 +3595,12 @@ def build_marked_fs(record, file_bytes):
     for i, c in enumerate((f.get("corrections") or []), 1):
         err = c.get("error", "") or ""
         rec = c.get("recommendation", "") or ""
-        text = (f"Review point {i} [{sevlabel.get(c.get('severity'), '')}]: {err}\n"
-                f"Recommended correction: {rec}")
+        # " · " separates labelled figures (Computed / Stated / Difference) — give
+        # each its own line in the comment bubble so the arithmetic reads clearly.
+        err_lines = err.replace(" · ", "\n")
+        text = (f"Assembly Works — Review point {i} "
+                f"[{sevlabel.get(c.get('severity'), '')}]:\n{err_lines}\n"
+                f"Action: {rec}")
         low = err.lower()
         tdef = _template_for(low)
         if tdef:
