@@ -133,7 +133,7 @@ BASE_HTML = """<!DOCTYPE html>
     <div class="brand">FS Review Portal</div>
     <div>
       {% if session.get('user') %}
-        {% if current_is_admin %}<a href="{{ url_for('admin_users') }}" style="margin-right:14px">People</a>{% endif %}
+        {% if current_user_can_invite %}<a href="{{ url_for('admin_users') }}" style="margin-right:14px">People</a>{% endif %}
         <span style="color:#dbeafe;font-size:14px">{{ session.get('name') }}</span>
         &nbsp;·&nbsp; <a href="{{ url_for('logout') }}">Log out</a>
       {% endif %}
@@ -167,10 +167,37 @@ LOGIN_HTML = """{% extends "base.html" %}
     </div>
     <button class="btn" type="submit" style="width:100%">Sign in</button>
     {% if magic %}
+    <button class="btn secondary" type="submit" name="sendotp" value="1"
+            style="width:100%;margin-top:10px">Email me a one-time code (OTP)</button>
     <button class="btn secondary" type="submit" name="sendlink" value="1"
-            style="width:100%;margin-top:10px">Email me a one-time link instead</button>
+            style="width:100%;margin-top:10px">Email me a sign-in link instead</button>
     {% endif %}
   </form>
+</div>
+{% endblock %}"""
+
+OTP_HTML = """{% extends "base.html" %}
+{% block title %}Enter code · FS Review{% endblock %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:40px auto">
+  <h1>Enter your sign-in code</h1>
+  <p class="muted">We emailed a 6-digit code to <strong>{{ email }}</strong>. It expires in 10 minutes.</p>
+  <form method="post" action="{{ url_for('otp_verify') }}" style="margin-top:16px">
+    <input type="hidden" name="email" value="{{ email }}">
+    <div style="margin-bottom:20px">
+      <label for="code">6-digit code</label>
+      <input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9 ]*"
+             maxlength="7" autocomplete="one-time-code" required autofocus
+             style="font-size:24px;letter-spacing:8px;text-align:center">
+    </div>
+    <button class="btn" type="submit" style="width:100%">Sign in</button>
+  </form>
+  <form method="post" action="{{ url_for('login') }}" style="margin-top:10px">
+    <input type="hidden" name="email" value="{{ email }}">
+    <button class="btn secondary" type="submit" name="sendotp" value="1"
+            style="width:100%">Send a new code</button>
+  </form>
+  <p class="muted" style="margin-top:12px"><a href="{{ url_for('login') }}">← Back to sign in</a></p>
 </div>
 {% endblock %}"""
 
@@ -676,25 +703,37 @@ ADMIN_HTML = """{% extends "base.html" %}
     <p class="muted" style="margin-top:8px;font-size:13px">Tip: pick a password, click "Add person", then send the person their email + password so they can sign in.</p>
   </form>
   <table>
-    <thead><tr><th>Name</th><th>Email / username</th><th>Login</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Email / username</th><th>Login</th><th>Can invite</th><th></th></tr></thead>
     <tbody>
       {% for u in users %}
       <tr><td>{{ u.name }}</td><td>{{ u.username }}</td>
-        <td>{% if u.has_password %}<span class="pill good">Password</span>{% else %}<span class="pill warn">Email link</span>{% endif %}</td>
-        <td>{% if u.username != admin_email and u.username != 'admin' %}
+        <td>{% if u.has_password %}<span class="pill good">Password</span>{% else %}<span class="pill warn">Email code/link</span>{% endif %}</td>
+        <td>{% if u.username == admin_email or u.username == 'admin' %}<span class="pill good">Admin</span>
+          {% elif u.can_invite %}<span class="pill good">Yes</span>
+            {% if is_full_admin %}<form method="post" action="{{ url_for('admin_grant') }}" style="margin:4px 0 0;display:inline">
+              <input type="hidden" name="email" value="{{ u.username }}"><input type="hidden" name="allow" value="0">
+              <button class="btn secondary" type="submit" style="padding:2px 8px;font-size:12px">Revoke</button></form>{% endif %}
+          {% else %}<span class="muted">No</span>
+            {% if is_full_admin %}<form method="post" action="{{ url_for('admin_grant') }}" style="margin:4px 0 0;display:inline">
+              <input type="hidden" name="email" value="{{ u.username }}"><input type="hidden" name="allow" value="1">
+              <button class="btn secondary" type="submit" style="padding:2px 8px;font-size:12px">Grant</button></form>{% endif %}
+          {% endif %}</td>
+        <td>{% if is_full_admin and u.username != admin_email and u.username != 'admin' %}
           <form method="post" action="{{ url_for('admin_remove') }}" onsubmit="return confirm('Remove this person?')" style="margin:0">
             <input type="hidden" name="email" value="{{ u.username }}">
             <button class="btn danger" type="submit">Remove</button>
-          </form>{% else %}<span class="muted">admin</span>{% endif %}</td></tr>
+          </form>{% elif u.username == admin_email or u.username == 'admin' %}<span class="muted">admin</span>{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  <p class="muted" style="margin-top:10px;font-size:13px">People with "Can invite: Yes" can add new people here, but only the admin can remove people or change invite rights.</p>
 </div>
 {% endblock %}"""
 
 app.jinja_loader = DictLoader({
     "base.html": BASE_HTML,
     "login.html": LOGIN_HTML,
+    "otp.html": OTP_HTML,
     "dashboard.html": DASHBOARD_HTML,
     "report.html": REPORT_HTML,
     "admin.html": ADMIN_HTML,
@@ -770,6 +809,12 @@ def init_db():
                 "uploaded_by TEXT, uploaded_at TEXT, findings JSONB, file_bytes BYTEA)")
     cur.execute("CREATE TABLE IF NOT EXISTS login_tokens ("
                 "token TEXT PRIMARY KEY, email TEXT, name TEXT, expires_at TEXT)")
+    # Invite rights: admins can grant selected people the right to invite others.
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_invite BOOLEAN DEFAULT FALSE")
+    # One-time 6-digit sign-in codes (OTP), one active code per email.
+    cur.execute("CREATE TABLE IF NOT EXISTS otp_codes ("
+                "email TEXT PRIMARY KEY, code_hash TEXT, expires_at TEXT, "
+                "attempts INT DEFAULT 0)")
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
         pw = os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")
@@ -790,11 +835,13 @@ def get_user(username):
     if USE_DB:
         conn = _db()
         cur = conn.cursor()
-        cur.execute("SELECT password_hash, name FROM users WHERE username=%s", (username,))
+        cur.execute("SELECT password_hash, name, can_invite FROM users WHERE username=%s",
+                    (username,))
         row = cur.fetchone()
         cur.close()
         conn.close()
-        return {"password_hash": row[0], "name": row[1]} if row else None
+        return ({"password_hash": row[0], "name": row[1], "can_invite": bool(row[2])}
+                if row else None)
     return load_users().get(username)
 
 
@@ -839,7 +886,8 @@ def invite_user(email, name, password=""):
         users = load_users()
         existing = users.get(email, {})
         users[email] = {"password_hash": pw_hash or existing.get("password_hash", ""),
-                        "name": name}
+                        "name": name,
+                        "can_invite": bool(existing.get("can_invite"))}
         _save(USERS_FILE, users)
 
 
@@ -847,14 +895,34 @@ def list_all_users():
     if USE_DB:
         conn = _db()
         cur = conn.cursor()
-        cur.execute("SELECT username, name, password_hash FROM users ORDER BY username")
+        cur.execute("SELECT username, name, password_hash, can_invite "
+                    "FROM users ORDER BY username")
         rows = cur.fetchall()
         cur.close()
         conn.close()
-        return [{"username": r[0], "name": r[1], "has_password": bool(r[2])} for r in rows]
+        return [{"username": r[0], "name": r[1], "has_password": bool(r[2]),
+                 "can_invite": bool(r[3])} for r in rows]
     return [{"username": u, "name": v.get("name", ""),
-             "has_password": bool(v.get("password_hash"))}
+             "has_password": bool(v.get("password_hash")),
+             "can_invite": bool(v.get("can_invite"))}
             for u, v in load_users().items()]
+
+
+def set_invite_right(email, allow):
+    """Grant or revoke the right to invite others (admin action)."""
+    email = email.strip().lower()
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET can_invite=%s WHERE username=%s", (bool(allow), email))
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        users = load_users()
+        if email in users:
+            users[email]["can_invite"] = bool(allow)
+            _save(USERS_FILE, users)
 
 
 def remove_user(email):
@@ -875,6 +943,17 @@ def remove_user(email):
 def is_admin():
     u = (session.get("user") or "").lower()
     return u == "admin" or (ADMIN_EMAIL and u == ADMIN_EMAIL)
+
+
+def current_can_invite():
+    """Admins always can invite; others only if granted the right."""
+    if is_admin():
+        return True
+    u = (session.get("user") or "").lower()
+    if not u:
+        return False
+    user = get_user(u)
+    return bool(user and user.get("can_invite"))
 
 
 def save_record(record, file_bytes):
@@ -1032,6 +1111,55 @@ def consume_login_token(token):
     return result
 
 
+OTP_TTL_MIN = 10       # one-time code validity, minutes
+OTP_MAX_ATTEMPTS = 5   # wrong tries before the code is invalidated
+
+
+def create_otp(email):
+    """Generate a 6-digit one-time sign-in code for an invited email (stored hashed)."""
+    code = f"{secrets.randbelow(1000000):06d}"
+    expires = (dt.datetime.utcnow() + dt.timedelta(minutes=OTP_TTL_MIN)).isoformat()
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO otp_codes (email, code_hash, expires_at, attempts) "
+                "VALUES (%s,%s,%s,0) "
+                "ON CONFLICT (email) DO UPDATE SET code_hash=EXCLUDED.code_hash, "
+                "expires_at=EXCLUDED.expires_at, attempts=0",
+                (email, generate_password_hash(code), expires))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return code
+
+
+def verify_otp(email, code):
+    """Check a 6-digit code. Deletes it on success, expiry or too many attempts."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("SELECT code_hash, expires_at, attempts FROM otp_codes WHERE email=%s",
+                (email,))
+    row = cur.fetchone()
+    ok = False
+    if row:
+        code_hash, expires_at, attempts = row
+        expired = True
+        try:
+            expired = dt.datetime.fromisoformat(expires_at) < dt.datetime.utcnow()
+        except Exception:
+            pass
+        if expired or attempts >= OTP_MAX_ATTEMPTS:
+            cur.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
+        elif check_password_hash(code_hash, code):
+            ok = True
+            cur.execute("DELETE FROM otp_codes WHERE email=%s", (email,))
+        else:
+            cur.execute("UPDATE otp_codes SET attempts=attempts+1 WHERE email=%s", (email,))
+        conn.commit()
+    cur.close()
+    conn.close()
+    return ok
+
+
 # Simple in-memory throttle: cap magic-link requests per email (per worker).
 _link_requests = {}
 
@@ -1064,6 +1192,26 @@ def login():
         ident = (request.form.get("email") or request.form.get("username") or "").strip().lower()
         password = request.form.get("password", "")
         send_link = request.form.get("sendlink")
+        send_otp = request.form.get("sendotp")
+
+        # 0) One-time 6-digit code (OTP) by email — the recommended sign-in.
+        if MAGIC_LOGIN and send_otp and ident:
+            if too_many_requests(ident):
+                flash("Too many requests — please wait a few minutes and try again.", "error")
+                return render_template("login.html", magic=True)
+            user = get_user(ident)            # the allow-list check
+            if user:
+                code = create_otp(ident)
+                send_email(
+                    ident, "Your FS Review sign-in code",
+                    f"<p>Hello,</p><p>Your one-time sign-in code is:</p>"
+                    f"<p style='font-size:28px;font-weight:bold;letter-spacing:6px'>{code}</p>"
+                    f"<p>It expires in {OTP_TTL_MIN} minutes. If you didn't request it, "
+                    f"you can ignore this email.</p>")
+            # Same message either way — don't reveal whether the email is invited.
+            flash("If your email is on the invite list, a 6-digit code is on its way. "
+                  "Enter it below.", "success")
+            return render_template("otp.html", email=ident)
 
         # 1) Password sign-in — works for anyone whose account has a password set.
         if password and not send_link:
@@ -1103,6 +1251,23 @@ def login():
     return render_template("login.html", magic=MAGIC_LOGIN)
 
 
+@app.route("/otp", methods=["POST"])
+def otp_verify():
+    """Second step of the OTP sign-in: check the 6-digit code."""
+    email = (request.form.get("email") or "").strip().lower()
+    code = (request.form.get("code") or "").strip().replace(" ", "")
+    if not (MAGIC_LOGIN and email and code):
+        flash("Enter the 6-digit code from your email.", "error")
+        return render_template("otp.html", email=email)
+    if verify_otp(email, code):
+        user = get_user(email)
+        session["user"] = email
+        session["name"] = (user or {}).get("name") or email
+        return redirect(url_for("dashboard"))
+    flash("That code is incorrect or has expired — request a new one.", "error")
+    return render_template("otp.html", email=email)
+
+
 @app.route("/auth/<token>")
 def auth_token(token):
     got = consume_login_token(token) if MAGIC_LOGIN else None
@@ -1118,16 +1283,17 @@ def auth_token(token):
 @app.route("/admin")
 @login_required
 def admin_users():
-    if not is_admin():
+    if not current_can_invite():
         abort(403)
     return render_template("admin.html", users=list_all_users(),
-                           magic=MAGIC_LOGIN, admin_email=ADMIN_EMAIL)
+                           magic=MAGIC_LOGIN, admin_email=ADMIN_EMAIL,
+                           is_full_admin=is_admin())
 
 
 @app.route("/admin/invite", methods=["POST"])
 @login_required
 def admin_invite():
-    if not is_admin():
+    if not current_can_invite():
         abort(403)
     email = request.form.get("email", "").strip().lower()
     name = request.form.get("name", "").strip() or email
@@ -1154,9 +1320,25 @@ def admin_remove():
     return redirect(url_for("admin_users"))
 
 
+@app.route("/admin/grant", methods=["POST"])
+@login_required
+def admin_grant():
+    """Grant or revoke invite rights (full admins only)."""
+    if not is_admin():
+        abort(403)
+    email = request.form.get("email", "").strip().lower()
+    allow = request.form.get("allow") == "1"
+    if email and email != (ADMIN_EMAIL or "") and email != "admin":
+        set_invite_right(email, allow)
+        flash(("Granted invite rights to " if allow else "Revoked invite rights from ")
+              + email + ".", "success")
+    return redirect(url_for("admin_users"))
+
+
 @app.context_processor
 def inject_globals():
-    return {"current_is_admin": is_admin()}
+    return {"current_is_admin": is_admin(),
+            "current_user_can_invite": current_can_invite()}
 
 
 @app.after_request
