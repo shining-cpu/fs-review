@@ -1693,9 +1693,12 @@ def check_pl(t_idx, table):
 
 def check_row_totals(t_idx, table):
     """Horizontal check: when the LAST column is a 'Total' column, each row's
-    components should add across to it (e.g. Statement of Changes in Equity)."""
+    components should add across to it (e.g. Statement of Changes in Equity).
+
+    Merged cells are counted ONCE: python-docx repeats the same underlying cell
+    for each column a merge spans, which used to double-count values and produce
+    false 'does not cast across' flags."""
     out = []
-    labels, numgrid = _grid(table)
     last_is_total = False
     for row in table.rows:
         cells = [c.text.strip().lower() for c in row.cells]
@@ -1704,17 +1707,26 @@ def check_row_totals(t_idx, table):
             break
     if not last_is_total:
         return out
-    ncols = max((len(r) for r in numgrid), default=0)
-    for r in range(len(numgrid)):
-        row = numgrid[r]
-        comps = [v for v in row[1:ncols - 1] if v is not None]
-        tot = row[ncols - 1] if ncols - 1 < len(row) else None
-        if tot is not None and len(comps) >= 2 and abs(sum(comps) - tot) > 0.5:
-            out.append({"table": t_idx + 1,
-                        "row": (labels[r][:40] or f"row {r + 1}"),
-                        "sum_across": round(sum(comps), 2),
-                        "stated_total": round(tot, 2),
-                        "difference": round(sum(comps) - tot, 2)})
+    for r_idx, row in enumerate(table.rows):
+        seen, vals, label = set(), [], ""
+        for i, cell in enumerate(row.cells):
+            tc = id(cell._tc)
+            if tc in seen:
+                continue
+            seen.add(tc)
+            if i == 0 or not label:
+                label = label or cell.text.strip()
+            v = _to_number(cell.text)
+            if i > 0 and v is not None:
+                vals.append(v)
+        if len(vals) >= 3:                    # at least 2 components + a total
+            comps, tot = vals[:-1], vals[-1]
+            if abs(sum(comps) - tot) > 0.5:
+                out.append({"table": t_idx + 1,
+                            "row": (label[:40] or f"row {r_idx + 1}"),
+                            "sum_across": round(sum(comps), 2),
+                            "stated_total": round(tot, 2),
+                            "difference": round(sum(comps) - tot, 2)})
     return out
 
 
