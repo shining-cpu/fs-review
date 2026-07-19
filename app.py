@@ -607,6 +607,19 @@ REPORT_HTML = """{% extends "base.html" %}
   {% endif %}
 </div>
 
+{% if f.disclosure_templates %}
+<div class="card">
+  <h2>Disclosure templates <span class="pill">{{ f.disclosure_templates|length }} triggered</span> <span class="muted" style="font-size:13px;font-weight:400">— paste-ready, based on this review's findings</span></h2>
+  <p class="muted">Adapt the [bracketed] items to the company's facts, then paste into the notes. Figures shown were read from this set.</p>
+  {% for t in f.disclosure_templates %}
+  <div style="border-left:4px solid #2E5496;background:#eaf1fb;border-radius:0 8px 8px 0;padding:10px 14px;margin:10px 0">
+    <div style="font-weight:600;color:#1F3864;margin-bottom:4px">{{ t.title }}</div>
+    <div style="color:#203864;white-space:pre-wrap;font-size:14px">{{ t.body }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Language &amp; spelling (rule scan) {% if f.language_issues %}<span class="pill warn">{{ f.language_issues|length }} to review</span>{% else %}<span class="pill good">Nothing flagged</span>{% endif %}</h2>
   {% if f.language_issues %}
@@ -2418,6 +2431,118 @@ def check_related_party_loans(doc):
     return uniq
 
 
+def build_disclosure_templates(findings, full_text_low=""):
+    """Paste-ready Singapore FRS disclosure templates, triggered by what this review
+    actually found and pre-filled with the company's own figures where known.
+    Square brackets mark facts the preparer must confirm."""
+    T = []
+
+    gc = findings.get("going_concern") or {}
+    if gc.get("at_risk"):
+        eq = gc.get("equity")
+        nc = gc.get("net_current")
+        eq_s = f"net liabilities of ${abs(eq):,.0f}" if (eq is not None and eq < 0) \
+            else "net assets of $[X]"
+        nc_s = f"net current liabilities of ${abs(nc):,.0f}" if (nc is not None and nc < 0) \
+            else "net current [assets/liabilities] of $[X]"
+        T.append({"title": "Going concern (FRS 1)", "body": (
+            "The Company incurred a [profit/loss] for the financial year of $[X] and, as at the "
+            f"reporting date, had {nc_s} and {eq_s}. These conditions indicate that a material "
+            "uncertainty exists that may cast significant doubt on the Company's ability to "
+            "continue as a going concern.\n\n"
+            "The financial statements have nevertheless been prepared on a going concern basis, "
+            "the validity of which depends on the continued financial support of [the "
+            "shareholder(s) / director(s) / holding company]. [Name] has provided a written "
+            "undertaking not to demand repayment of the amount due to [him/her/it] of $[X] and "
+            "to provide such financial support as is necessary for the Company to meet its "
+            "obligations as and when they fall due, for at least twelve months from the date of "
+            "approval of these financial statements. Management has prepared cash-flow "
+            "projections covering that period.\n\n"
+            "On this basis, the directors consider the use of the going concern basis to be "
+            "appropriate. Should the Company be unable to continue as a going concern, "
+            "adjustments would be required to write down assets to their recoverable amounts, "
+            "reclassify non-current assets and liabilities as current, and provide for any "
+            "further liabilities that might arise.")})
+
+    rps = findings.get("related_party") or []
+    if rps:
+        lines = "\n".join("  - " + rp["error"] for rp in rps)
+        T.append({"title": "Related party transactions (FRS 24)", "body": (
+            "Related parties comprise the directors and shareholders of the Company and "
+            "entities controlled by them.\n\n"
+            "Significant balances with related parties at the reporting date:\n"
+            f"{lines}\n"
+            "These balances are unsecured, interest-free and repayable on demand[, except as "
+            "disclosed in the going-concern note].\n\n"
+            "Key management personnel compensation for the year:\n"
+            "  Short-term employee benefits: $[X] (prior year: $[X]).\n\n"
+            "Significant related-party transactions during the year: [describe — e.g. "
+            "directors' remuneration, advances made/repaid, dividends declared].")})
+
+    if any(rp.get("kind") == "loan to director" for rp in rps):
+        T.append({"title": "Loan to a director — Companies Act 1967 s.162", "body": (
+            "At the reporting date, an amount of $[X] was due from a director. The directors "
+            "have assessed that this arrangement [falls within an exemption under section 162 "
+            "of the Companies Act 1967 / was approved by the company in general meeting / was "
+            "fully repaid on (date)]. The amount is [interest-free / interest-bearing at X% "
+            "per annum], unsecured and repayable on demand.\n\n"
+            "The directors have assessed the recoverability of the amount due from the "
+            "director and are of the view that no allowance for expected credit losses is "
+            "required [or: an allowance of $X has been recognised].")})
+
+    if any(c.get("kind") == "tax sign / presentation"
+           for c in (findings.get("pl_checks") or [])):
+        T.append({"title": "Income tax expense (with prior-year over/under-provision)", "body": (
+            "Income tax expense comprises:\n"
+            "  Current year tax:                                    $[X]\n"
+            "  (Over)/under-provision in respect of prior years:    $[X] / ($[X])\n"
+            "  Income tax expense recognised in profit or loss:     $[X]\n\n"
+            "The total tax expense reconciles to the profit before tax at the statutory rate "
+            "of 17%, adjusted for the partial tax exemption, corporate income tax rebate, "
+            "non-deductible expenses and [unutilised losses]. Note that the balance-sheet "
+            "provision for taxation should roll forward: opening provision + total charge − "
+            "tax paid = closing provision. An over-provision is a credit and is presented in "
+            "brackets.")})
+
+    if any(k.get("frs") == "FRS 116" and not k.get("present")
+           for k in (findings.get("frs_checks") or [])):
+        T.append({"title": "Leases (FRS 116) — choose the applicable option", "body": (
+            "Option A — right-of-use asset recognised:\n"
+            "The Company leases [premises] for its operations. A right-of-use asset and a "
+            "lease liability are recognised at the lease commencement date. The right-of-use "
+            "asset is depreciated on a straight-line basis over the lease term of [X] years; "
+            "the lease liability is measured at the present value of the remaining lease "
+            "payments, discounted at the Company's incremental borrowing rate of [X]%.\n\n"
+            "Option B — exemption applied:\n"
+            "The Company's lease of [premises] is a short-term lease with a lease term of 12 "
+            "months or less [or: a lease of a low-value asset]. The Company has elected not to "
+            "recognise a right-of-use asset and lease liability; lease payments are recognised "
+            "as an expense on a straight-line basis over the lease term. Rent expense for the "
+            "year was $[X] (prior year: $[X]).")})
+
+    if gc.get("has_losses"):
+        T.append({"title": "Unrecognised deferred tax assets (FRS 12)", "body": (
+            "At the reporting date, the Company has unutilised tax losses of approximately "
+            "$[X] (prior year: $[X]) available for offset against future taxable profits, "
+            "subject to agreement by the Comptroller of Income Tax and compliance with the "
+            "relevant provisions of the Income Tax Act 1947 (including the shareholding "
+            "test). No deferred tax asset has been recognised in respect of these losses due "
+            "to the uncertainty of the availability of future taxable profits.")})
+
+    if "dividend" in full_text_low:
+        T.append({"title": "Dividends", "body": (
+            "During the financial year, the Company declared a [final/interim] one-tier "
+            "tax-exempt dividend of $[X] ([X] cents per share) in respect of the financial "
+            "year ended [date].\n\n"
+            "[If unpaid at year-end:] The dividend remained unpaid at the reporting date and "
+            "is presented as 'dividends payable' within current liabilities; it is NOT shown "
+            "as a cash outflow in the statement of cash flows.\n"
+            "[If paid during the year:] The dividend was paid during the year and is "
+            "presented as a financing cash outflow in the statement of cash flows.")})
+
+    return T
+
+
 def build_corrections(findings):
     """Turn every finding into a concrete correction, split into the ERROR (what is
     wrong) and the RECOMMENDATION (what to do about it)."""
@@ -2535,7 +2660,7 @@ def review_docx(path):
         "tables": 0, "paragraph_count": 0,
         "tally_checks": [], "balance_checks": [],
         "pl_checks": [], "row_checks": [], "cross_checks": [], "cash_anchor": None,
-        "related_party": [],
+        "related_party": [], "disclosure_templates": [],
         "frs_checks": [], "language_issues": [],
         "ai": {"enabled": False, "error": None, "frs_observations": [],
                "corrected_figures": [], "suggested_wording": [],
@@ -2597,6 +2722,7 @@ def review_docx(path):
     findings["acra"] = acra
 
     findings["corrections"] = build_corrections(findings)
+    findings["disclosure_templates"] = build_disclosure_templates(findings, full_text_low)
 
     findings["warnings"].append(
         "This review combines automated checks (arithmetic, balance-sheet and "
@@ -2878,6 +3004,15 @@ def build_word_report(record):
                        for g in ai["grammar_issues"]])
         else:
             H("AI review"); body(ai.get("error", "AI review not enabled."))
+
+        if f.get("disclosure_templates"):
+            H("Disclosure templates (paste-ready)")
+            body("Triggered by this review's findings — adapt the [bracketed] items to the "
+                 "company's facts before pasting into the notes.", 9)
+            for t in f["disclosure_templates"]:
+                body(t.get("title", ""), 11, True)
+                for line in (t.get("body", "") or "").split("\n"):
+                    body(line, 10)
 
         H("FRS disclosure checklist")
         table(["FRS", "Disclosure", "Detected"],
