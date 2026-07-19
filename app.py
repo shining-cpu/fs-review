@@ -1428,6 +1428,24 @@ COMMON_TYPOS = {
     "acquisiton": "acquisition", "transalated": "translated",
 }
 
+# Incorrect PHRASING commonly seen in SME drafts — corrected as tracked changes
+# in the revised FS (case-sensitive so the replacement keeps the sentence intact).
+INCORRECT_PHRASES = {
+    "The Company are": "The Company is",
+    "the Company are": "the Company is",
+    "theses standard": "these standards",
+    "these standard did": "these standards did",
+    "de recognition": "derecognition",
+    "cash generating unit": "cash-generating unit",
+    "financial statement of the Company": "financial statements of the Company",
+    "The financial statement for the financial year":
+        "The financial statements for the financial year",
+    "board of Directors of the company": "Board of Directors of the Company",
+    "adoption of theses standard": "adoption of these standards",
+    "material effect on the financial statement of":
+        "material effect on the financial statements of",
+}
+
 # FRS disclosure checklist — keyword presence heuristics
 FRS_CHECKS = [
     ("FRS 1", "Going concern basis stated",
@@ -1756,6 +1774,12 @@ def check_language(doc):
                 seen.add(us)
                 issues.append({"kind": "Spelling (US→UK)",
                                "found": us, "suggest": uk,
+                               "context": text.strip()[:90]})
+        for phrase, fix in INCORRECT_PHRASES.items():
+            if phrase in text and phrase not in seen:
+                seen.add(phrase)
+                issues.append({"kind": "Incorrect phrasing",
+                               "found": phrase, "suggest": fix,
                                "context": text.strip()[:90]})
         for typo, fix in COMMON_TYPOS.items():
             if re.search(r"\b" + re.escape(typo) + r"\b", low) and typo not in seen:
@@ -3460,31 +3484,68 @@ def build_marked_fs(record, file_bytes):
     _rid = [9001]
 
     def _tracked_replace(par, old, new):
-        """Replace old->new inside one run of par as a Word tracked change."""
-        for run in par.runs:
-            if old and old in (run.text or ""):
-                before, _, after = run.text.partition(old)
-                run.text = before
-                anchor = run._element
-                d = OxmlElement("w:del")
-                d.set(qn("w:id"), str(_rid[0])); _rid[0] += 1
-                d.set(qn("w:author"), AUTHOR); d.set(qn("w:date"), STAMP)
-                dr = OxmlElement("w:r"); dtx = OxmlElement("w:delText")
-                dtx.set(qn("xml:space"), "preserve"); dtx.text = old
-                dr.append(dtx); d.append(dr)
-                ins = OxmlElement("w:ins")
-                ins.set(qn("w:id"), str(_rid[0])); _rid[0] += 1
-                ins.set(qn("w:author"), AUTHOR); ins.set(qn("w:date"), STAMP)
-                ir = OxmlElement("w:r"); it = OxmlElement("w:t")
-                it.set(qn("xml:space"), "preserve"); it.text = new
-                ir.append(it); ins.append(ir)
-                anchor.addnext(ins); anchor.addnext(d)
-                if after:
-                    tr = OxmlElement("w:r"); tt = OxmlElement("w:t")
-                    tt.set(qn("xml:space"), "preserve"); tt.text = after
-                    tr.append(tt); ins.addnext(tr)
-                return True
-        return False
+        """Replace old->new in a paragraph as a Word tracked change (accept/reject).
+
+        Handles phrases that SPAN MULTIPLE RUNS — Word routinely splits sentences
+        into many runs (spell-check, formatting), which previously made phrase
+        corrections fall back to comments instead of being marked up."""
+        import copy as _copy
+        if not old:
+            return False
+        runs = par.runs
+        full = "".join(r.text or "" for r in runs)
+        idx = full.find(old)
+        if idx < 0:
+            return False
+        end = idx + len(old)
+        pos, affected = 0, []
+        for r in runs:
+            t = r.text or ""
+            rs, re_ = pos, pos + len(t)
+            if rs < end and re_ > idx:
+                affected.append((r, max(idx, rs) - rs, min(end, re_) - rs))
+            pos = re_
+        if not affected:
+            return False
+        single = len(affected) == 1
+        r0, s0, e0 = affected[0]
+        t0 = r0.text or ""
+        suffix_single = t0[e0:] if single else None
+        r0.text = t0[:s0]
+        if not single:
+            for (r, s, e) in affected[1:-1]:
+                r.text = ""
+            rl, sl, el = affected[-1]
+            rl.text = (rl.text or "")[el:]
+        rpr = r0._element.find(qn("w:rPr"))
+        anchor = r0._element
+        d = OxmlElement("w:del")
+        d.set(qn("w:id"), str(_rid[0])); _rid[0] += 1
+        d.set(qn("w:author"), AUTHOR); d.set(qn("w:date"), STAMP)
+        dr = OxmlElement("w:r")
+        if rpr is not None:
+            dr.append(_copy.deepcopy(rpr))
+        dtx = OxmlElement("w:delText")
+        dtx.set(qn("xml:space"), "preserve"); dtx.text = old
+        dr.append(dtx); d.append(dr)
+        ins = OxmlElement("w:ins")
+        ins.set(qn("w:id"), str(_rid[0])); _rid[0] += 1
+        ins.set(qn("w:author"), AUTHOR); ins.set(qn("w:date"), STAMP)
+        ir = OxmlElement("w:r")
+        if rpr is not None:
+            ir.append(_copy.deepcopy(rpr))
+        it = OxmlElement("w:t")
+        it.set(qn("xml:space"), "preserve"); it.text = new
+        ir.append(it); ins.append(ir)
+        anchor.addnext(ins); anchor.addnext(d)
+        if single and suffix_single:
+            tr = OxmlElement("w:r")
+            if rpr is not None:
+                tr.append(_copy.deepcopy(rpr))
+            tt = OxmlElement("w:t")
+            tt.set(qn("xml:space"), "preserve"); tt.text = suffix_single
+            tr.append(tt); ins.addnext(tr)
+        return True
 
     # ---- Word margin-comment machinery -------------------------------------
     _comments = []          # (id, text) for the comments part
