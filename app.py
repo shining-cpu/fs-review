@@ -37,6 +37,7 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 RECORDS_FILE = os.path.join(DATA_DIR, "records.json")
+AUDIT_FILE = os.path.join(DATA_DIR, "audit_log.json")
 
 ALLOWED_EXTENSIONS = {".docx", ".pdf", ".xlsx", ".xls"}
 MAX_CONTENT_LENGTH = 25 * 1024 * 1024  # 25 MB
@@ -133,6 +134,7 @@ BASE_HTML = """<!DOCTYPE html>
     <div class="brand">{% if has_logo %}<img src="{{ url_for('logo') }}" alt="Assembly Works" style="height:26px;vertical-align:middle;margin-right:10px;background:#fff;border-radius:4px;padding:2px 6px">{% endif %}ASSEMBLY WORKS <span style="font-weight:400;opacity:.85">· FS Review Portal</span></div>
     <div>
       {% if session.get('user') %}
+        {% if current_is_admin %}<a href="{{ url_for('admin_audit') }}" style="margin-right:14px">Audit log</a>{% endif %}
         {% if current_user_can_invite %}<a href="{{ url_for('admin_users') }}" style="margin-right:14px">People</a>{% endif %}
         <span style="color:#dbeafe;font-size:14px">{{ session.get('name') }}</span>
         &nbsp;·&nbsp; <a href="{{ url_for('logout') }}">Log out</a>
@@ -731,6 +733,36 @@ ADMIN_HTML = """{% extends "base.html" %}
 </div>
 {% endblock %}"""
 
+AUDIT_HTML = """{% extends "base.html" %}
+{% block title %}Audit log · FS Review{% endblock %}
+{% block content %}
+<div class="card">
+  <p class="muted"><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
+  <h1>Audit log</h1>
+  <p class="muted">Every sign-in, upload, review, download, deletion and people change — newest first (latest 500 shown).
+     <a class="btn secondary" href="{{ url_for('admin_audit_csv') }}" style="margin-left:10px">Download full log (CSV)</a></p>
+  <table>
+    <thead><tr><th>Time (UTC)</th><th>Person</th><th>Action</th><th>Detail</th><th>IP</th></tr></thead>
+    <tbody>
+      {% for e in events %}
+      <tr>
+        <td style="white-space:nowrap">{{ e.at }}</td>
+        <td>{{ e.actor }}</td>
+        <td>{% if 'failed' in e.action %}<span class="pill bad">{{ e.action }}</span>
+            {% elif e.action in ('login','logout') %}<span class="pill">{{ e.action }}</span>
+            {% elif 'download' in e.action %}<span class="pill good">{{ e.action }}</span>
+            {% elif e.action in ('delete record','remove person') %}<span class="pill warn">{{ e.action }}</span>
+            {% else %}<span class="pill good">{{ e.action }}</span>{% endif %}</td>
+        <td class="muted">{{ e.detail }}</td>
+        <td class="muted">{{ e.ip }}</td>
+      </tr>
+      {% endfor %}
+      {% if not events %}<tr><td colspan="5" class="muted">No events logged yet.</td></tr>{% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}"""
+
 app.jinja_loader = DictLoader({
     "base.html": BASE_HTML,
     "login.html": LOGIN_HTML,
@@ -738,6 +770,7 @@ app.jinja_loader = DictLoader({
     "dashboard.html": DASHBOARD_HTML,
     "report.html": REPORT_HTML,
     "admin.html": ADMIN_HTML,
+    "audit.html": AUDIT_HTML,
 })
 
 
@@ -812,6 +845,10 @@ def init_db():
                 "token TEXT PRIMARY KEY, email TEXT, name TEXT, expires_at TEXT)")
     # Invite rights: admins can grant selected people the right to invite others.
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_invite BOOLEAN DEFAULT FALSE")
+    # Audit trail: every significant action, kept permanently.
+    cur.execute("CREATE TABLE IF NOT EXISTS audit_log ("
+                "id SERIAL PRIMARY KEY, at TEXT, actor TEXT, action TEXT, "
+                "detail TEXT, ip TEXT)")
     # One-time 6-digit sign-in codes (OTP), one active code per email.
     cur.execute("CREATE TABLE IF NOT EXISTS otp_codes ("
                 "email TEXT PRIMARY KEY, code_hash TEXT, expires_at TEXT, "
@@ -941,20 +978,76 @@ def remove_user(email):
         _save(USERS_FILE, users)
 
 
+# --------------------------------------------------------------------------
+# Audit trail — who did what, when, from where. Never allowed to break the app.
+# --------------------------------------------------------------------------
+def log_event(action, detail=""):
+    try:
+        actor = (session.get("user") or "anonymous")
+    except Exception:
+        actor = "system"
+    try:
+        ip = (request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+              or request.remote_addr or "")
+    except Exception:
+        ip = ""
+    at = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        if USE_DB:
+            conn = _db()
+            cur = conn.cursor()
+            cur.execute("INSERT INTO audit_log (at, actor, action, detail, ip) "
+                        "VALUES (%s,%s,%s,%s,%s)",
+                        (at, actor, action, str(detail)[:500], ip))
+            conn.commit()
+            cur.close()
+            conn.close()
+        else:
+            log = _load(AUDIT_FILE, [])
+            log.append({"at": at, "actor": actor, "action": action,
+                        "detail": str(detail)[:500], "ip": ip})
+            _save(AUDIT_FILE, log[-5000:])   # cap file mode at 5,000 entries
+    except Exception as e:
+        print(f"[audit] could not log '{action}': {e}")
+
+
+def get_audit_log(limit=500):
+    """Most recent audit entries, newest first."""
+    if USE_DB:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("SELECT at, actor, action, detail, ip FROM audit_log "
+                    "ORDER BY id DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [{"at": r[0], "actor": r[1], "action": r[2],
+                 "detail": r[3], "ip": r[4]} for r in rows]
+    log = _load(AUDIT_FILE, [])
+    return list(reversed(log[-limit:]))
+
+
 def is_admin():
     u = (session.get("user") or "").lower()
     return u == "admin" or (ADMIN_EMAIL and u == ADMIN_EMAIL)
 
 
 def current_can_invite():
-    """Admins always can invite; others only if granted the right."""
+    """Admins always can invite; others only if granted the right.
+
+    Cached in the session so this does not cost a database round-trip on every
+    single page render (a big win on the free tier, where each new connection
+    to the database takes a TLS handshake). Grant/revoke takes effect on the
+    person's next sign-in."""
     if is_admin():
         return True
     u = (session.get("user") or "").lower()
     if not u:
         return False
-    user = get_user(u)
-    return bool(user and user.get("can_invite"))
+    if "can_invite" not in session:
+        user = get_user(u)
+        session["can_invite"] = bool(user and user.get("can_invite"))
+    return bool(session.get("can_invite"))
 
 
 def save_record(record, file_bytes):
@@ -979,15 +1072,18 @@ def save_record(record, file_bytes):
 
 
 def list_records():
+    """Dashboard list — metadata only. The findings JSON can be megabytes per
+    record; fetching it for every row made the dashboard slow, and the list view
+    never displays it."""
     if USE_DB:
         conn = _db()
         cur = conn.cursor()
-        cur.execute("SELECT id, original_name, ext, size_bytes, uploaded_by, uploaded_at, "
-                    "findings FROM records ORDER BY uploaded_at DESC")
+        cur.execute("SELECT id, original_name, ext, size_bytes, uploaded_by, uploaded_at "
+                    "FROM records ORDER BY uploaded_at DESC")
         rows = cur.fetchall()
         cur.close()
         conn.close()
-        return [dict(zip(_REC_COLS, r)) for r in rows]
+        return [dict(zip(_REC_COLS[:-1], r)) for r in rows]
     return sorted(load_records(), key=lambda r: r["uploaded_at"], reverse=True)
 
 
@@ -1221,7 +1317,10 @@ def login():
                     check_password_hash(user["password_hash"], password):
                 session["user"] = ident
                 session["name"] = user.get("name", ident)
+                session["can_invite"] = bool(user.get("can_invite"))
+                log_event("login", f"password sign-in: {ident}")
                 return redirect(request.args.get("next") or url_for("dashboard"))
+            log_event("login failed", f"wrong email/password for: {ident}")
             flash("Invalid email or password.", "error")
             return render_template("login.html", magic=MAGIC_LOGIN)
 
@@ -1264,7 +1363,10 @@ def otp_verify():
         user = get_user(email)
         session["user"] = email
         session["name"] = (user or {}).get("name") or email
+        session["can_invite"] = bool((user or {}).get("can_invite"))
+        log_event("login", f"OTP sign-in: {email}")
         return redirect(url_for("dashboard"))
+    log_event("login failed", f"wrong/expired OTP for: {email}")
     flash("That code is incorrect or has expired — request a new one.", "error")
     return render_template("otp.html", email=email)
 
@@ -1276,6 +1378,7 @@ def auth_token(token):
         email, name = got
         session["user"] = email
         session["name"] = name or email
+        log_event("login", f"email-link sign-in: {email}")
         return redirect(url_for("dashboard"))
     flash("That sign-in link is invalid or has expired — please request a new one.", "error")
     return redirect(url_for("login"))
@@ -1301,6 +1404,7 @@ def admin_invite():
     password = request.form.get("password", "").strip()
     if email:
         invite_user(email, name, password)
+        log_event("invite", f"added {email}" + (" (with password)" if password else " (email sign-in)"))
         if password:
             flash(f"Added {email}. They can sign in now with that email and password — "
                   f"send those details to them.", "success")
@@ -1317,6 +1421,7 @@ def admin_remove():
     email = request.form.get("email", "").strip().lower()
     if email and email != (ADMIN_EMAIL or "") and email != "admin":
         remove_user(email)
+        log_event("remove person", email)
         flash(f"Removed {email}.", "success")
     return redirect(url_for("admin_users"))
 
@@ -1331,9 +1436,43 @@ def admin_grant():
     allow = request.form.get("allow") == "1"
     if email and email != (ADMIN_EMAIL or "") and email != "admin":
         set_invite_right(email, allow)
+        log_event("invite rights", ("granted to " if allow else "revoked from ") + email)
         flash(("Granted invite rights to " if allow else "Revoked invite rights from ")
               + email + ".", "success")
     return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/audit")
+@login_required
+def admin_audit():
+    """Audit trail — full admin only."""
+    if not is_admin():
+        abort(403)
+    return render_template("audit.html", events=get_audit_log(500))
+
+
+@app.route("/admin/audit.csv")
+@login_required
+def admin_audit_csv():
+    if not is_admin():
+        abort(403)
+    import csv as _csv
+    from flask import Response
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["Time (UTC)", "Person", "Action", "Detail", "IP"])
+    for e in get_audit_log(5000):
+        w.writerow([e["at"], e["actor"], e["action"], e["detail"], e["ip"]])
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition":
+                             "attachment; filename=fs-review-audit-log.csv"})
+
+
+@app.route("/healthz")
+def healthz():
+    """Lightweight keep-alive endpoint (no database hit) — point a free uptime
+    pinger at this every ~10 minutes to stop the free instance spinning down."""
+    return "ok", 200
 
 
 # Firm branding: drop a "logo.png" next to app.py (commit it to the repo) and it
@@ -1386,6 +1525,7 @@ def robots_txt():
 
 @app.route("/logout")
 def logout():
+    log_event("logout")
     session.clear()
     return redirect(url_for("login"))
 
@@ -3213,6 +3353,7 @@ def upload():
         "findings": findings,
     }
     save_record(record, file_bytes)
+    log_event("upload & review", f"{file.filename} ({rec_id})")
 
     flash("File uploaded and reviewed.", "success")
     return redirect(url_for("report", rec_id=rec_id))
@@ -3235,6 +3376,7 @@ def download(rec_id):
     if not got:
         abort(404)
     name, data = got
+    log_event("download original", f"{name} ({rec_id})")
     return send_file(io.BytesIO(data), as_attachment=True, download_name=name)
 
 
@@ -3242,6 +3384,7 @@ def download(rec_id):
 @login_required
 def delete(rec_id):
     delete_record(rec_id)
+    log_event("delete record", rec_id)
     flash("Record deleted.", "success")
     return redirect(url_for("dashboard"))
 
@@ -3739,6 +3882,7 @@ def download_revised(rec_id):
     if not name.lower().endswith(".docx"):
         abort(400)
     buf = build_marked_fs(record, data)
+    log_event("download revised FS", f"{record['original_name']} ({rec_id})")
     out = os.path.splitext(record["original_name"])[0] + "_revised (marked up).docx"
     return send_file(buf, as_attachment=True, download_name=out,
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -3752,6 +3896,7 @@ def download_report(rec_id):
     if not record:
         abort(404)
     buf = build_word_report(record)
+    log_event("download review report", f"{record['original_name']} ({rec_id})")
     name = os.path.splitext(record["original_name"])[0] + "_reviewed.docx"
     return send_file(buf, as_attachment=True, download_name=name,
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
