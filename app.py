@@ -740,7 +740,8 @@ AUDIT_HTML = """{% extends "base.html" %}
   <p class="muted"><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
   <h1>Audit log</h1>
   <p class="muted">Every sign-in, upload, review, download, deletion and people change — newest first (latest 500 shown).
-     <a class="btn secondary" href="{{ url_for('admin_audit_csv') }}" style="margin-left:10px">Download full log (CSV)</a></p>
+     <a class="btn secondary" href="{{ url_for('admin_audit_csv') }}" style="margin-left:10px">Download full log (CSV)</a>
+     <a class="btn secondary" href="{{ url_for('admin_backup') }}" style="margin-left:6px">Download backup (JSON)</a></p>
   <table>
     <thead><tr><th>Time (UTC)</th><th>Person</th><th>Action</th><th>Detail</th><th>IP</th></tr></thead>
     <tbody>
@@ -1468,6 +1469,51 @@ def admin_audit_csv():
                              "attachment; filename=fs-review-audit-log.csv"})
 
 
+@app.errorhandler(500)
+def server_error(e):
+    """Friendly error page + the failure goes into the audit log so problems
+    are visible instead of silent."""
+    try:
+        log_event("error", f"500 on {request.path}: {e}")
+    except Exception:
+        pass
+    return ("<div style='font-family:Arial;max-width:560px;margin:80px auto;"
+            "text-align:center'><h2>Something went wrong</h2>"
+            "<p>The error has been logged. Please try again — if it keeps "
+            "happening, tell your administrator what you were doing.</p>"
+            "<p><a href='/'>Back to the dashboard</a></p></div>"), 500
+
+
+@app.errorhandler(413)
+def too_large(e):
+    flash("That file is larger than the 25 MB limit.", "error")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/admin/backup.json")
+@login_required
+def admin_backup():
+    """One-click backup (admin only): people, records metadata + findings, and
+    the audit trail as a single JSON file. The uploaded source files themselves
+    live in the database (Neon), which is the primary store."""
+    if not is_admin():
+        abort(403)
+    from flask import Response
+    users = [{k: v for k, v in u.items()} for u in list_all_users()]
+    records = list_records()
+    payload = {
+        "exported_at": dt.datetime.utcnow().isoformat() + "Z",
+        "users": users,
+        "records": records,
+        "audit_log": get_audit_log(5000),
+    }
+    log_event("backup export")
+    return Response(json.dumps(payload, indent=2, default=str),
+                    mimetype="application/json",
+                    headers={"Content-Disposition":
+                             "attachment; filename=fs-review-backup.json"})
+
+
 @app.route("/healthz")
 def healthz():
     """Lightweight keep-alive endpoint (no database hit) — point a free uptime
@@ -1835,8 +1881,10 @@ def check_pl(t_idx, table):
                                 "difference": round(diff, 2)})
         if net is not None and pbt is not None:
             tx = tax or 0
-            exp_minus = pbt - tx          # tax treated as an expense (deduct)
-            exp_plus = pbt + tx           # tax treated as a credit (add back)
+            # Tax may be shown positive ("1,892") or bracketed ("(1,892)" → parsed
+            # negative). Use the magnitude so both presentation styles are handled:
+            exp_minus = pbt - abs(tx)     # tax treated as an expense (deduct)
+            exp_plus = pbt + abs(tx)      # tax treated as a credit (add back)
             if abs(exp_minus - net) <= 0.5:
                 pass                      # ties correctly, nothing to flag
             elif tx and abs(exp_plus - net) <= 0.5:

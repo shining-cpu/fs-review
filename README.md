@@ -1,74 +1,104 @@
-# FS Review Portal
+# Assembly Works — FS Review Portal
 
-A secure web app for uploading financial-statement files (.docx / .pdf / .xlsx)
-and viewing an automated review report. Access is gated by username + password.
+Internal web portal that reviews unaudited financial statements (Word .docx) for
+Singapore-incorporated companies. Upload an FS, get back:
 
-## What it does
+- A severity-ranked punch list of corrections (error + recommended correction)
+- Deterministic arithmetic checks — balance equation, P&L casts, cross-adds,
+  cash-flow ties, note-to-face ties, related-party / s.162 director loans,
+  going-concern solvency
+- AI review (Gemini) — FRS observations, corrected figures, suggested wording
+- Paste-ready disclosure templates triggered by the findings
+- A **Reviewed report** (.docx) and a **Revised FS** — the original file with
+  Word margin comments, tracked-change phrasing corrections, and proposed
+  disclosures appended in blue
 
-- **Login** — passwords are hashed (never stored in plain text); sessions are signed.
-- **Upload** — drag in a `.docx`, `.pdf`, `.xlsx`, or `.xls` (max 25 MB).
-- **Review report** — for `.docx` files it auto-detects the standard FS sections,
-  counts tables, and runs column-total tally checks, then shows the findings.
-- **Manage** — download the original or delete a record.
+Live at **https://fs-review.onrender.com** · Repo `shining-cpu/fs-review`
 
-> The automated review is a first-pass aid, not a substitute for a full FRS/IFRS
-> compliance review.
+---
 
-## Run it locally
+## Architecture (one file)
 
-You need Python 3.10+.
-
-```bash
-cd "FS review in HTML"
-pip install -r requirements.txt
-python app.py
-```
-
-Open http://localhost:5000
-
-**First login:** username `admin`, password `ChangeMe123!`
-(or set `ADMIN_PASSWORD` before the first run). Change it right away — see below.
-
-## Managing users
-
-```bash
-python manage_users.py add jane SuperSecret123 "Jane Tan"
-python manage_users.py list
-python manage_users.py remove jane
-```
-
-To replace the default admin password, just `add admin <new password> "Administrator"`.
-
-## Deploy it (hosted website)
-
-The app is a standard Flask + gunicorn app, so any of these work. **Render** is the
-simplest for a non-developer:
-
-### Render (recommended)
-1. Put this folder in a GitHub repo (or upload it).
-2. On https://render.com → **New → Web Service** → connect the repo.
-3. Settings:
-   - **Build command:** `pip install -r requirements.txt`
-   - **Start command:** `gunicorn app:app`
-4. Add environment variables (Render → Environment):
-   - `FLASK_SECRET_KEY` — a long random string (keeps logins secure across restarts).
-   - `ADMIN_PASSWORD` — your chosen first admin password.
-5. Deploy. Render gives you a public `https://...onrender.com` URL.
-
-### Important for hosting
-- Uploaded files and the users/records files are stored on disk under `uploads/`
-  and `data/`. On hosts with ephemeral disks (free Render tier), these reset on
-  redeploy. For permanent storage, attach a persistent disk or move storage to a
-  database / cloud bucket — happy to set that up if you need it.
-- Always set `FLASK_SECRET_KEY` in production; otherwise sessions reset on restart.
-
-## Files
+Everything lives in **`app.py`** — Flask routes, embedded HTML templates
+(Jinja2 DictLoader), the review engine, Word report builders, storage and auth.
 
 | File | Purpose |
 |------|---------|
-| `app.py` | The web app (routes, auth, review logic). |
-| `templates/` | HTML pages (login, dashboard, report). |
-| `manage_users.py` | Add / list / remove users from the command line. |
-| `requirements.txt` | Python dependencies. |
-| `Procfile` | Start command for hosts like Render/Heroku. |
-| `uploads/`, `data/` | Created on first run; hold files and user/record data. |
+| `app.py` | The whole application |
+| `Procfile` | How Render starts it: `gunicorn app:app --workers 1 --threads 4 --timeout 180` |
+| `requirements.txt` | Python dependencies |
+| `test_app.py` | Test suite for the review engine (`pytest -q`) |
+| `.github/workflows/ci.yml` | Runs the tests automatically on every push to GitHub |
+| `logo.png` (optional) | Assembly Works logo — appears on Word reports if present |
+
+**Storage:** Neon Postgres when `DATABASE_URL` is set (users, records, OTP codes,
+login tokens, audit log). Without it, JSON files under `data/` — fine for local
+testing only (Render's disk is wiped on each deploy).
+
+**Login:** password, email magic-link, or emailed 6-digit OTP (10-min expiry,
+5 attempts). Invite-only; admins and users with invite rights can add people.
+
+**Audit trail:** every login, upload, download, delete and invite is logged —
+see *Audit log* in the nav (admin only), downloadable as CSV, plus a one-click
+JSON backup at *Download backup*.
+
+---
+
+## Environment variables (Render → Environment)
+
+| Variable | Required | What it does |
+|----------|----------|--------------|
+| `DATABASE_URL` | Yes (production) | Neon Postgres connection string |
+| `FLASK_SECRET_KEY` | **Yes — set this** | Keeps sessions valid across restarts. Any long random string. Without it everyone is logged out on every deploy/restart |
+| `GEMINI_API_KEY` | For AI review | Google AI Studio key (free tier) |
+| `GEMINI_MODEL` | No | Defaults to `gemini-2.5-flash` — the free model. Do **not** set `gemini-2.5-pro` (not on free tier, quota 0) |
+| `RESEND_API_KEY` | For email login | Resend key (magic links + OTP emails) |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Yes | Seeds the admin account |
+| `APP_BASE_URL` | For email login | `https://fs-review.onrender.com` |
+
+---
+
+## Deploying a change (the runbook)
+
+1. Edit `app.py` (or have Claude edit it).
+2. GitHub → repo → open the file → **Upload files** / edit → commit to `main`.
+   CI runs the tests automatically — a green tick means the engine still works.
+3. Render dashboard → the service → **Manual Deploy → Deploy latest commit**.
+4. Wait for **"Deploy live"** on the Events tab (~2–4 min).
+5. Hard-refresh the portal (Ctrl+Shift+R).
+
+If a deploy breaks the site: Render → Events → previous deploy → **Rollback**.
+
+---
+
+## Running locally / tests
+
+```bash
+pip install -r requirements.txt pytest
+python app.py            # http://localhost:5000 (JSON-file storage)
+pytest -q                # run the engine tests
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause & fix |
+|---------|-------------|
+| First page load takes ~1 min | Render free tier sleeps after 15 min idle. Fix: UptimeRobot pinging `/healthz` every 10 min, or upgrade to Starter ($7/mo, always-on) |
+| "Out of memory" in Render logs | 512 MB free-tier limit; a huge file or concurrent reviews. It auto-restarts. Upgrade to Starter for 2 GB |
+| AI review section says error / empty | Check `GEMINI_API_KEY` is set and `GEMINI_MODEL` is `gemini-2.5-flash`. Free tier also rate-limits: wait a minute and re-run |
+| Everyone logged out after deploy | `FLASK_SECRET_KEY` not set (see above) |
+| OTP / magic-link emails not arriving | Check `RESEND_API_KEY`, and that assemblyworks.co is verified in Resend |
+| Upload rejected | 25 MB limit; .docx only for review |
+
+---
+
+## Notes & known limits
+
+- Free Gemini tier may use submitted content for training — accepted trade-off
+  for now; upgrade to a paid key for confidentiality-sensitive clients.
+- The automated review is a first-pass aid, not a substitute for a qualified
+  reviewer's full FRS/IFRS review.
+- PPE-note recompute is deliberately AI-guided (formats vary too much for a
+  deterministic rule).
